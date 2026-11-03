@@ -1,0 +1,10 @@
+# Changelog
+
+## v0.1.0
+
+- Neutral title storage core: title keys across networks, int64 variables with the Title User
+  Storage operations (set, add, try-set with operator, write conditions, multi-slot, multi-owner and
+  friend reads), objects (info, JSON metadata filter, stable ids, expiry, collections),
+  private / friends / public visibility from the account core's friend graph, per-owner quotas per
+  title, per-title network opt-out, account erasure.
+- gRPC `openpak.titlestorage.v1.TitleStorage` on 20231; HTTP health and erasure on 20230.

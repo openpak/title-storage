@@ -1,0 +1,328 @@
+// Package grpcapi is the title storage's gRPC surface for the console-side adapters (np-tus,
+// np-uploader, later wfc-sake, nex, xb-stfd, npln): the same rules as the service, one wire.
+package grpcapi
+
+import (
+	"context"
+	"errors"
+	"log"
+	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
+
+	"github.com/openpak/title-storage/internal/service"
+	"github.com/openpak/title-storage/internal/store"
+	pb "github.com/openpak/title-storage/proto/openpak/titlestorage/v1"
+)
+
+type Server struct {
+	pb.UnimplementedTitleStorageServer
+	svc *service.Service
+	key string
+}
+
+func New(svc *service.Service, internalKey string) *Server {
+	return &Server{svc: svc, key: internalKey}
+}
+
+func (s *Server) authorize(ctx context.Context) error {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok || s.key == "" {
+		return status.Error(codes.Unauthenticated, "missing internal credentials")
+	}
+	if vals := md.Get("x-internal-key"); len(vals) == 0 || vals[0] != s.key {
+		return status.Error(codes.Unauthenticated, "missing internal credentials")
+	}
+	return nil
+}
+
+func ref(r *pb.TitleRef) service.Ref {
+	return service.Ref{Network: r.GetNetwork(), Title: r.GetTitle()}
+}
+
+func visIn(v pb.Visibility) string {
+	switch v {
+	case pb.Visibility_VISIBILITY_PRIVATE:
+		return store.Private
+	case pb.Visibility_VISIBILITY_FRIENDS:
+		return store.Friends
+	case pb.Visibility_VISIBILITY_PUBLIC:
+		return store.Public
+	}
+	return ""
+}
+
+func visOut(v string) pb.Visibility {
+	switch v {
+	case store.Private:
+		return pb.Visibility_VISIBILITY_PRIVATE
+	case store.Friends:
+		return pb.Visibility_VISIBILITY_FRIENDS
+	case store.Public:
+		return pb.Visibility_VISIBILITY_PUBLIC
+	}
+	return pb.Visibility_VISIBILITY_UNSPECIFIED
+}
+
+func cond(c *pb.Condition) service.Condition {
+	var out service.Condition
+	if c != nil && c.ExpectUpdatedUnixMs != nil {
+		t := time.UnixMilli(c.GetExpectUpdatedUnixMs()).UTC()
+		out.Updated = &t
+	}
+	if c != nil && c.ExpectSetter != nil {
+		v := c.GetExpectSetter()
+		out.Setter = &v
+	}
+	return out
+}
+
+func pbVar(v store.Variable) *pb.Variable {
+	return &pb.Variable{Owner: v.Owner, Slot: v.Slot, Value: v.Value, Setter: v.Setter, UpdatedUnixMs: v.Updated.UnixMilli(),
+		Visibility: visOut(v.Visibility), Network: v.Network}
+}
+
+func pbVarResult(r service.VarResult) *pb.VariableResult {
+	out := &pb.VariableResult{Stored: r.Stored, ConditionFailed: r.CondFail, HadPrevious: r.HadPrev, PreviousValue: r.Previous}
+	if r.Exists {
+		out.Variable = pbVar(r.Var)
+	}
+	return out
+}
+
+func pbObj(o store.Object) *pb.Object {
+	out := &pb.Object{Id: uint64(o.ID), Title: o.Title, Owner: o.Owner, Collection: o.Collection, Name: o.Name, Info: o.Info, MetaJson: o.Meta,
+		Body: o.Body, Size: uint64(o.Size), Setter: o.Setter, Visibility: visOut(o.Visibility), Network: o.Network,
+		CreatedUnixMs: o.Created.UnixMilli(), UpdatedUnixMs: o.Updated.UnixMilli()}
+	if o.Expires != nil {
+		out.ExpiresUnixMs = o.Expires.UnixMilli()
+	}
+	return out
+}
+
+func objResp(o *store.Object) *pb.ObjectResponse {
+	if o == nil {
+		return &pb.ObjectResponse{}
+	}
+	return &pb.ObjectResponse{Object: pbObj(*o), Found: true}
+}
+
+func (s *Server) SetVariables(ctx context.Context, req *pb.SetVariablesRequest) (*pb.SetVariablesResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	items := make(map[int32]int64, len(req.GetItems()))
+	for _, it := range req.GetItems() {
+		items[it.GetSlot()] = it.GetValue()
+	}
+	err := s.svc.SetVariables(ctx, ref(req.GetRef()), req.GetOwner(), req.GetWriter(), req.GetSetter(), visIn(req.GetVisibility()), items)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &pb.SetVariablesResponse{}, nil
+}
+
+func (s *Server) ListVariables(ctx context.Context, req *pb.ListVariablesRequest) (*pb.ListVariablesResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	vs, hits, err := s.svc.ListVariables(ctx, ref(req.GetRef()), service.Query{Viewer: req.GetViewer(), Owners: req.GetOwners(),
+		Friends: req.GetFriendsOfViewer(), Self: req.GetIncludeSelf(), Slots: req.GetSlots(), Sort: req.GetSort(),
+		Ascending: req.GetAscending(), Offset: int(req.GetOffset()), Limit: int(req.GetLimit())})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	out := &pb.ListVariablesResponse{Hits: uint32(hits)}
+	for _, v := range vs {
+		out.Variables = append(out.Variables, pbVar(v))
+	}
+	return out, nil
+}
+
+func (s *Server) AddVariable(ctx context.Context, req *pb.AddVariableRequest) (*pb.VariableResult, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	r, err := s.svc.AddVariable(ctx, ref(req.GetRef()), req.GetOwner(), req.GetWriter(), req.GetSetter(), visIn(req.GetVisibility()),
+		req.GetSlot(), req.GetDelta(), cond(req.GetCondition()))
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return pbVarResult(r), nil
+}
+
+func (s *Server) TrySetVariable(ctx context.Context, req *pb.TrySetVariableRequest) (*pb.VariableResult, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	r, err := s.svc.TrySetVariable(ctx, ref(req.GetRef()), req.GetOwner(), req.GetWriter(), req.GetSetter(), visIn(req.GetVisibility()),
+		req.GetSlot(), req.GetValue(), req.GetOp(), req.GetOperand(), cond(req.GetCondition()))
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return pbVarResult(r), nil
+}
+
+func (s *Server) DeleteVariables(ctx context.Context, req *pb.DeleteVariablesRequest) (*pb.DeleteResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	n, err := s.svc.DeleteVariables(ctx, ref(req.GetRef()), req.GetOwner(), req.GetWriter(), req.GetSlots())
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &pb.DeleteResponse{Deleted: uint32(n)}, nil
+}
+
+func (s *Server) PutObject(ctx context.Context, req *pb.PutObjectRequest) (*pb.ObjectResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	o, failed, err := s.svc.PutObject(ctx, ref(req.GetRef()), service.Put{Owner: req.GetOwner(), Writer: req.GetWriter(), Setter: req.GetSetter(),
+		Collection: req.GetCollection(), Name: req.GetName(), Info: req.GetInfo(), Meta: req.GetMetaJson(), Body: req.GetBody(),
+		Vis: visIn(req.GetVisibility()), TTL: time.Duration(req.GetTtlSeconds()) * time.Second, Cond: cond(req.GetCondition())})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if failed {
+		return &pb.ObjectResponse{ConditionFailed: true}, nil
+	}
+	return objResp(&o), nil
+}
+
+func (s *Server) GetObject(ctx context.Context, req *pb.GetObjectRequest) (*pb.ObjectResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	o, err := s.svc.GetObject(ctx, ref(req.GetRef()), req.GetViewer(), req.GetOwner(), req.GetCollection(), req.GetName(), req.GetIncludeBody())
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return objResp(o), nil
+}
+
+func (s *Server) GetObjectByID(ctx context.Context, req *pb.GetObjectByIDRequest) (*pb.ObjectResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	o, err := s.svc.GetObjectByID(ctx, req.GetNetwork(), req.GetViewer(), int64(req.GetId()), req.GetIncludeBody())
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return objResp(o), nil
+}
+
+func (s *Server) ListObjects(ctx context.Context, req *pb.ListObjectsRequest) (*pb.ListObjectsResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	os, hits, err := s.svc.ListObjects(ctx, ref(req.GetRef()), service.ObjQuery{
+		Query: service.Query{Viewer: req.GetViewer(), Owners: req.GetOwners(), Friends: req.GetFriendsOfViewer(), Self: req.GetIncludeSelf(),
+			Sort: req.GetSort(), Ascending: req.GetAscending(), Offset: int(req.GetOffset()), Limit: int(req.GetLimit())},
+		Collection: req.GetCollection(), Names: req.GetNames(), MetaFilter: req.GetMetaFilterJson(), Body: req.GetIncludeBody()})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	out := &pb.ListObjectsResponse{Hits: uint32(hits)}
+	for _, o := range os {
+		out.Objects = append(out.Objects, pbObj(o))
+	}
+	return out, nil
+}
+
+func (s *Server) DeleteObjects(ctx context.Context, req *pb.DeleteObjectsRequest) (*pb.DeleteResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	n, err := s.svc.DeleteObjects(ctx, ref(req.GetRef()), req.GetOwner(), req.GetWriter(), req.GetCollection(), req.GetNames())
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &pb.DeleteResponse{Deleted: uint32(n)}, nil
+}
+
+func (s *Server) Usage(ctx context.Context, req *pb.UsageRequest) (*pb.UsageResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	u, err := s.svc.Usage(ctx, ref(req.GetRef()), req.GetOwner())
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &pb.UsageResponse{Bytes: uint64(u.Bytes), Objects: uint32(u.Objects), Variables: uint32(u.Variables), QuotaBytes: uint64(u.QuotaBytes),
+		QuotaObjects: uint32(u.QuotaObjects), MaxObjectBytes: uint32(u.MaxObjectBytes)}, nil
+}
+
+func (s *Server) MapTitle(ctx context.Context, req *pb.MapTitleRequest) (*pb.MapTitleResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	if err := s.svc.Store.MapTitle(ctx, req.GetTitle(), req.GetName(), req.GetNetwork(), req.GetNativeId()); err != nil {
+		return nil, mapErr(err)
+	}
+	return &pb.MapTitleResponse{}, nil
+}
+
+func pbTitle(t store.Title) *pb.TitleInfo {
+	return &pb.TitleInfo{Title: t.Key, Name: t.Name, CrossNetwork: t.Cross, QuotaBytes: uint64(t.QuotaBytes), QuotaObjects: uint32(t.QuotaObjects),
+		MaxObjectBytes: uint32(t.MaxObjectBytes), DefaultVisibility: visOut(t.DefaultVis), NativeIds: t.NativeIDs}
+}
+
+func (s *Server) UpsertTitle(ctx context.Context, req *pb.UpsertTitleRequest) (*pb.TitleInfo, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	p := store.TitlePolicy{Name: req.GetName(), QuotaBytes: int64(req.GetQuotaBytes()), QuotaObjects: int(req.GetQuotaObjects()),
+		MaxObjectBytes: int(req.GetMaxObjectBytes()), DefaultVis: visIn(req.GetDefaultVisibility())}
+	switch req.GetCrossNetwork() {
+	case pb.Tristate_TRISTATE_TRUE:
+		v := true
+		p.Cross = &v
+	case pb.Tristate_TRISTATE_FALSE:
+		v := false
+		p.Cross = &v
+	}
+	t, err := s.svc.Store.UpsertTitle(ctx, req.GetTitle(), p)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return pbTitle(t), nil
+}
+
+func (s *Server) ListTitles(ctx context.Context, _ *pb.ListTitlesRequest) (*pb.ListTitlesResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	ts, err := s.svc.Store.Titles(ctx)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	out := &pb.ListTitlesResponse{}
+	for _, t := range ts {
+		out.Titles = append(out.Titles, pbTitle(t))
+	}
+	return out, nil
+}
+
+func mapErr(err error) error {
+	switch {
+	case errors.Is(err, service.ErrBadAccount), errors.Is(err, service.ErrBadRequest), errors.Is(err, store.ErrOverflow):
+		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, service.ErrTooLarge), errors.Is(err, store.ErrQuota):
+		return status.Error(codes.ResourceExhausted, err.Error())
+	case errors.Is(err, service.ErrForbidden):
+		return status.Error(codes.PermissionDenied, err.Error())
+	case errors.Is(err, service.ErrNeedNet), errors.Is(err, store.ErrConflict):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, store.ErrNoTitle):
+		return status.Error(codes.NotFound, err.Error())
+	}
+	// The account core being down is the caller's retry, not a service bug.
+	if c := status.Code(err); c == codes.Unavailable || c == codes.DeadlineExceeded {
+		return status.Error(codes.Unavailable, "account core unavailable")
+	}
+	log.Printf("title-storage: %v", err)
+	return status.Error(codes.Internal, "title storage error")
+}

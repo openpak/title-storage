@@ -1,0 +1,18 @@
+# Sample only. Copy to ~/.config/containers/systemd/openpak-title-storage.container, then
+# ~/openpak/deploy/pin-ips.sh --apply to pin its address.
+[Unit]
+Description=OpenPak title storage (neutral per-title variables and objects)
+Requires=openpak-postgres.service openpak-account.service
+After=openpak-postgres.service openpak-account.service
+[Container]
+ContainerName=openpak-title-storage
+Image=ghcr.io/openpak/title-storage:latest
+AutoUpdate=registry
+Network=openpak.network
+PublishPort=127.0.0.1:20230:20230
+EnvironmentFile=%h/openpak/deploy/.env
+Environment=TITLE_STORAGE_HTTP_ADDR=:20230 TITLE_STORAGE_GRPC_ADDR=:20231 TITLE_STORAGE_METRICS_ADDR=:20232
+[Service]
+Restart=always
+[Install]
+WantedBy=default.target
