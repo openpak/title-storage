@@ -19,6 +19,8 @@ import (
 	"github.com/openpak/title-storage/internal/api"
 	"github.com/openpak/title-storage/internal/core"
 	"github.com/openpak/title-storage/internal/grpcapi"
+	"github.com/openpak/title-storage/internal/grpclog"
+	"github.com/openpak/title-storage/internal/httplog"
 	"github.com/openpak/title-storage/internal/service"
 	"github.com/openpak/title-storage/internal/store"
 	pb "github.com/openpak/title-storage/proto/openpak/titlestorage/v1"
@@ -73,7 +75,7 @@ func main() {
 	httpAddr := env("TITLE_STORAGE_HTTP_ADDR", "127.0.0.1:20230")
 	go func() {
 		log.Printf("title-storage: http on %s", httpAddr)
-		srv := &http.Server{Addr: httpAddr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		srv := &http.Server{Addr: httpAddr, Handler: httplog.Middleware(mux), ReadHeaderTimeout: 5 * time.Second}
 		log.Fatal(srv.ListenAndServe())
 	}()
 
@@ -82,7 +84,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("title-storage: grpc listen: %v", err)
 	}
-	gs := grpc.NewServer(grpc.MaxRecvMsgSize(int(defaults.MaxObjectBytes)+(1<<20)), grpc.MaxSendMsgSize(256<<20))
+	gs := grpc.NewServer(grpc.ChainUnaryInterceptor(grpclog.Unary), grpc.MaxRecvMsgSize(int(defaults.MaxObjectBytes)+(1<<20)), grpc.MaxSendMsgSize(256<<20))
 	pb.RegisterTitleStorageServer(gs, grpcapi.New(svc, key))
 	go func() {
 		log.Printf("title-storage: grpc on %s", grpcAddr)
