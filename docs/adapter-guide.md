@@ -81,3 +81,9 @@ Reference adapters: `np-tus` (variables and slots) and `np-uploader` (attachment
 * Write tests against a fake title-storage server (see np-tus's `fakestorage`).
 * Account erasure needs nothing from you: the finaliser calls
   `DELETE /internal/accounts/{account}/data`.
+
+## Message sizes
+
+List calls can exceed gRPC's 4 MB default reply size (nx-pctl hit 5 MB for one device against the
+parental core). Adapters must raise `MaxCallRecvMsgSize` on the client, or page the list and keep pages
+small. Server-side, keep list replies bounded (page size caps) so one account cannot force a huge reply.

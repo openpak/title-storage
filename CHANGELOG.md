@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.2 — 2026-11-03
+
+- Adapter guide: gRPC message-size note (raise MaxCallRecvMsgSize or page lists).
+
 ## v0.1.1
 
 - `GetObject` with an empty owner finds the newest object of a collection and name under any owner
