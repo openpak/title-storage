@@ -1360,7 +1360,7 @@ type GetObjectRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Ref           *TitleRef              `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
 	Viewer        string                 `protobuf:"bytes,2,opt,name=viewer,proto3" json:"viewer,omitempty"`
-	Owner         string                 `protobuf:"bytes,3,opt,name=owner,proto3" json:"owner,omitempty"`
+	Owner         string                 `protobuf:"bytes,3,opt,name=owner,proto3" json:"owner,omitempty"` // empty: the newest object of that name under any owner (use only with unguessable names)
 	Collection    string                 `protobuf:"bytes,4,opt,name=collection,proto3" json:"collection,omitempty"`
 	Name          string                 `protobuf:"bytes,5,opt,name=name,proto3" json:"name,omitempty"`
 	IncludeBody   bool                   `protobuf:"varint,6,opt,name=include_body,json=includeBody,proto3" json:"include_body,omitempty"`

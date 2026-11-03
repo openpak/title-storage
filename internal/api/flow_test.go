@@ -326,6 +326,13 @@ func TestObjects(t *testing.T) {
 	if g := must(c.GetObjectByID(ctx, &pb.GetObjectByIDRequest{Viewer: dave, Id: id})); g.Found {
 		t.Fatalf("by id stranger: %+v", g)
 	}
+	// Without an owner the name is looked up across owners (an upload reference), viewer rules intact.
+	if g := must(c.GetObject(ctx, &pb.GetObjectRequest{Ref: np, Viewer: bob, Collection: "tus", Name: "3"})); !g.Found || g.Object.Owner != alice {
+		t.Fatalf("find by name: %+v", g)
+	}
+	if g := must(c.GetObject(ctx, &pb.GetObjectRequest{Ref: np, Viewer: dave, Collection: "tus", Name: "3"})); g.Found {
+		t.Fatalf("find by name, stranger: %+v", g)
+	}
 	// A server-named object gets its id as its name.
 	n := put(&pb.PutObjectRequest{Collection: "uploads", Body: []byte("x"), Visibility: pb.Visibility_VISIBILITY_PUBLIC})
 	if n.Object.Name == "" || n.Object.Collection != "uploads" {

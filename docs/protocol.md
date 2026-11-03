@@ -55,7 +55,7 @@ that prints centiseconds can echo them back and match.
 | Call | Meaning |
 | --- | --- |
 | `PutObject(ref, owner, writer, setter, collection, name, info, meta_json, body, visibility, ttl_seconds, condition)` | create or replace. `collection` defaults to `default`; an empty `name` is named by the new id. The numeric `id` is assigned once and survives replacement. `ttl_seconds` sets an expiry (0 keeps the current one). `Condition` is checked against the existing object |
-| `GetObject(ref, viewer, owner, collection, name, include_body)` | `found=false` for missing, expired or unreadable |
+| `GetObject(ref, viewer, owner, collection, name, include_body)` | `found=false` for missing, expired or unreadable. With `owner` empty it finds the newest object of that collection and name under any owner (for upload references that are unguessable by construction; the viewer rules still apply) |
 | `GetObjectByID(network, viewer, id, include_body)` | the same by global id |
 | `ListObjects(ref, viewer, owners[] or friends_of_viewer [+include_self], collection, names[], meta_filter_json, sort, ascending, offset, limit, include_body)` | `sort` is `updated`, `created`, `size`, `name` or `id`; `meta_filter_json` matches objects whose metadata contains it (jsonb `@>`) |
 | `DeleteObjects(ref, owner, writer, collection, names[])` | empty `names` = the whole collection |

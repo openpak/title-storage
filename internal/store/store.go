@@ -158,6 +158,7 @@ CREATE TABLE IF NOT EXISTS objects (
     UNIQUE (title_key, ns, owner, collection, name)
 );
 CREATE INDEX IF NOT EXISTS objects_owner ON objects (owner);
+CREATE INDEX IF NOT EXISTS objects_name ON objects (title_key, collection, name);
 CREATE INDEX IF NOT EXISTS objects_list ON objects (title_key, collection, updated);
 CREATE INDEX IF NOT EXISTS objects_expiry ON objects (expires_at) WHERE expires_at IS NOT NULL;
 
@@ -743,6 +744,21 @@ func (s *Store) GetObject(ctx context.Context, t Title, network, owner, collecti
 	o, err := scanObject(s.DB.QueryRow(ctx, `SELECT `+objCols+bodyCol(withBody)+` FROM objects
 		WHERE title_key=$1 AND ns=$2 AND owner=$3 AND collection=$4 AND name=$5 AND (expires_at IS NULL OR expires_at > now())`,
 		t.Key, t.NS(network), owner, collection, name), withBody)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &o, nil
+}
+
+// FindObject loads the newest object with this collection and name under any owner, without any
+// visibility check. For names that are unguessable by construction (an upload reference).
+func (s *Store) FindObject(ctx context.Context, t Title, network, collection, name string, withBody bool) (*Object, error) {
+	o, err := scanObject(s.DB.QueryRow(ctx, `SELECT `+objCols+bodyCol(withBody)+` FROM objects
+		WHERE title_key=$1 AND ns=$2 AND collection=$3 AND name=$4 AND (expires_at IS NULL OR expires_at > now())
+		ORDER BY updated DESC LIMIT 1`, t.Key, t.NS(network), collection, name), withBody)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.1
+
+- `GetObject` with an empty owner finds the newest object of a collection and name under any owner
+  (viewer rules still apply), for upload references that are unguessable by construction.
+
 ## v0.1.0
 
 - Neutral title storage core: title keys across networks, int64 variables with the Title User

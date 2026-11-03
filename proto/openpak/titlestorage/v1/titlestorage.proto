@@ -197,7 +197,7 @@ message PutObjectRequest {
 message GetObjectRequest {
   TitleRef ref    = 1;
   string viewer   = 2;
-  string owner    = 3;
+  string owner    = 3; // empty: the newest object of that name under any owner (use only with unguessable names)
   string collection = 4;
   string name     = 5;
   bool include_body = 6;

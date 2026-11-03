@@ -442,11 +442,16 @@ func (s *Service) PutObject(ctx context.Context, r Ref, p Put) (store.Object, bo
 	return s.Store.PutObject(ctx, put)
 }
 
-// GetObject returns the object when it exists and the viewer may read it (nil otherwise: the
+// GetObject returns the object (with owner empty: the newest of that name under any owner, for
+// unguessable names) when it exists and the viewer may read it (nil otherwise: the
 // same answer for both, so private rows cannot be probed).
 func (s *Service) GetObject(ctx context.Context, r Ref, viewer, owner, collection, name string, body bool) (*store.Object, error) {
-	if err := validOwner(owner); err != nil {
-		return nil, err
+	if owner != "" {
+		if err := validOwner(owner); err != nil {
+			return nil, err
+		}
+	} else if name == "" {
+		return nil, ErrBadRequest
 	}
 	if viewer != "" {
 		if err := validAccount(viewer); err != nil {
@@ -460,7 +465,12 @@ func (s *Service) GetObject(ctx context.Context, r Ref, viewer, owner, collectio
 	if err != nil || !found {
 		return nil, err
 	}
-	o, err := s.Store.GetObject(ctx, t, r.Network, strings.ToLower(owner), collection, name, body)
+	var o *store.Object
+	if owner == "" {
+		o, err = s.Store.FindObject(ctx, t, r.Network, collection, name, body)
+	} else {
+		o, err = s.Store.GetObject(ctx, t, r.Network, strings.ToLower(owner), collection, name, body)
+	}
 	if err != nil || o == nil {
 		return nil, err
 	}
