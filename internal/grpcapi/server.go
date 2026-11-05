@@ -50,6 +50,8 @@ func visIn(v pb.Visibility) string {
 		return store.Friends
 	case pb.Visibility_VISIBILITY_PUBLIC:
 		return store.Public
+	case pb.Visibility_VISIBILITY_RECIPIENTS:
+		return store.Recipients
 	}
 	return ""
 }
@@ -62,6 +64,8 @@ func visOut(v string) pb.Visibility {
 		return pb.Visibility_VISIBILITY_FRIENDS
 	case store.Public:
 		return pb.Visibility_VISIBILITY_PUBLIC
+	case store.Recipients:
+		return pb.Visibility_VISIBILITY_RECIPIENTS
 	}
 	return pb.Visibility_VISIBILITY_UNSPECIFIED
 }
@@ -95,7 +99,8 @@ func pbVarResult(r service.VarResult) *pb.VariableResult {
 func pbObj(o store.Object) *pb.Object {
 	out := &pb.Object{Id: uint64(o.ID), Title: o.Title, Owner: o.Owner, Collection: o.Collection, Name: o.Name, Info: o.Info, MetaJson: o.Meta,
 		Body: o.Body, Size: uint64(o.Size), Setter: o.Setter, Visibility: visOut(o.Visibility), Network: o.Network,
-		CreatedUnixMs: o.Created.UnixMilli(), UpdatedUnixMs: o.Updated.UnixMilli(), GetUrl: o.GetURL, Blob: o.BlobKey != "", Sha256: o.SHA256}
+		CreatedUnixMs: o.Created.UnixMilli(), UpdatedUnixMs: o.Updated.UnixMilli(), GetUrl: o.GetURL, Blob: o.BlobKey != "", Sha256: o.SHA256,
+		Recipients: o.Recipients, RecipientsIncludeFriends: o.RecipientsFriends}
 	if o.Expires != nil {
 		out.ExpiresUnixMs = o.Expires.UnixMilli()
 	}
@@ -285,7 +290,8 @@ func (s *Server) PutObject(ctx context.Context, req *pb.PutObjectRequest) (*pb.O
 	}
 	o, failed, err := s.svc.PutObject(ctx, ref(req.GetRef()), service.Put{Owner: req.GetOwner(), Writer: req.GetWriter(), Setter: req.GetSetter(),
 		Collection: req.GetCollection(), Name: req.GetName(), Info: req.GetInfo(), Meta: req.GetMetaJson(), Body: req.GetBody(),
-		Vis: visIn(req.GetVisibility()), TTL: time.Duration(req.GetTtlSeconds()) * time.Second, Cond: cond(req.GetCondition())})
+		Vis: visIn(req.GetVisibility()), Recipients: req.GetRecipients(), RecipientsFriends: req.GetRecipientsIncludeFriends(),
+		TTL: time.Duration(req.GetTtlSeconds()) * time.Second, Cond: cond(req.GetCondition())})
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -327,7 +333,7 @@ func (s *Server) ListObjects(ctx context.Context, req *pb.ListObjectsRequest) (*
 		AllOwners: req.GetAllOwners(), ExcludeOwners: req.GetExcludeOwners(), Collection: req.GetCollection(), Collections: req.GetCollections(),
 		Names: req.GetNames(), MetaFilter: req.GetMetaFilterJson(), MetaRange: req.GetMetaRangeJson(),
 		CreatedAfter: req.GetCreatedAfterMs(), CreatedBefore: req.GetCreatedBeforeMs(), UpdatedAfter: req.GetUpdatedAfterMs(),
-		UpdatedBefore: req.GetUpdatedBeforeMs(), MinRatings: req.GetMinRatingCount(), Body: req.GetIncludeBody(), Ratings: req.GetIncludeRatings()})
+		UpdatedBefore: req.GetUpdatedBeforeMs(), MinRatings: req.GetMinRatingCount(), Received: req.GetReceived(), Body: req.GetIncludeBody(), Ratings: req.GetIncludeRatings()})
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -358,7 +364,8 @@ func (s *Server) PrepareUpload(ctx context.Context, req *pb.PrepareUploadRequest
 	}
 	p, err := s.svc.PrepareUpload(ctx, ref(req.GetRef()), service.Prepare{Owner: req.GetOwner(), Writer: req.GetWriter(), Setter: req.GetSetter(),
 		Collection: req.GetCollection(), Name: req.GetName(), Size: int64(req.GetSize()), SHA256: req.GetSha256(), Info: req.GetInfo(),
-		Meta: req.GetMetaJson(), Vis: visIn(req.GetVisibility()), TTL: time.Duration(req.GetTtlSeconds()) * time.Second, PostForm: req.GetPostForm()})
+		Meta: req.GetMetaJson(), Vis: visIn(req.GetVisibility()), Recipients: req.GetRecipients(), RecipientsFriends: req.GetRecipientsIncludeFriends(),
+		TTL: time.Duration(req.GetTtlSeconds()) * time.Second, PostForm: req.GetPostForm()})
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -407,6 +414,9 @@ func pbTitle(t store.Title) *pb.TitleInfo {
 func (s *Server) UpsertTitle(ctx context.Context, req *pb.UpsertTitleRequest) (*pb.TitleInfo, error) {
 	if err := s.authorize(ctx); err != nil {
 		return nil, err
+	}
+	if req.GetDefaultVisibility() == pb.Visibility_VISIBILITY_RECIPIENTS {
+		return nil, mapErr(service.ErrBadRequest) // a recipient list is per object
 	}
 	p := store.TitlePolicy{Name: req.GetName(), QuotaBytes: int64(req.GetQuotaBytes()), QuotaObjects: int(req.GetQuotaObjects()),
 		MaxObjectBytes: int(req.GetMaxObjectBytes()), DefaultVis: visIn(req.GetDefaultVisibility())}

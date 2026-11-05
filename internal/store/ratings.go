@@ -256,15 +256,17 @@ func (s *Store) ResetRatings(ctx context.Context, id int64, slots []int32) (int6
 
 // ObjectHead is what a visibility check needs of an object.
 type ObjectHead struct {
-	ID         int64
-	NS         string
-	Owner      string
-	Visibility string
+	ID                int64
+	NS                string
+	Owner             string
+	Visibility        string
+	Recipients        []string
+	RecipientsFriends bool
 }
 
 // ObjectHeads loads the live objects among ids, in id order.
 func (s *Store) ObjectHeads(ctx context.Context, ids []int64) ([]ObjectHead, error) {
-	rows, err := s.DB.Query(ctx, `SELECT id, ns, owner, visibility FROM objects WHERE id = ANY($1) AND (expires_at IS NULL OR expires_at > now()) ORDER BY id`, ids)
+	rows, err := s.DB.Query(ctx, `SELECT id, ns, owner, visibility, recipients, recipients_friends FROM objects WHERE id = ANY($1) AND (expires_at IS NULL OR expires_at > now()) ORDER BY id`, ids)
 	if err != nil {
 		return nil, err
 	}

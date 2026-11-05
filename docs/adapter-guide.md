@@ -51,9 +51,14 @@ Reference adapters: `np-tus` (variables and slots) and `np-uploader` (attachment
   the object `id` (stable across replacement), owner = the uploader's account, `name` = the NEX
   `name` or empty (server-named), `collection` = the NEX `data_type`, `meta_json` carries tags,
   period, flags and the `refer_data_id`, `info` the persistence-slot blob.
-* Permissions: owner-only to `private`, friends to `friends`, public to `public`. "Specified
-  people" has no neutral form yet: keep the list in `meta_json` and filter adapter-side, or use
-  `private` and have the adapter check its own list.
+* Permissions (`DataStorePermission`): 0 public to `public`, 1 friends to `friends`, 3 private to
+  `private`, 2 specified to `recipients` with `recipients` = the `RecipientIDs` PIDs mapped to
+  accounts, 4 to `recipients` + `recipients_include_friends` (v0.6.0). For 0, 1 and 3 still pass
+  `RecipientIDs` as `recipients`: they are stored and returned (the meta echoes them) but grant
+  nothing. A PID with no account cannot be a recipient: leave it out. `SearchTypeReceived` is
+  `ListObjects(all_owners, received=true)`. `DelPermission` and its recipients go in `meta_json`:
+  the write rule (owner, or an account the core lets interact) is the core's delete check; a
+  stricter delete list is the adapter's check before `DeleteObjects`.
 * Search (`DataStoreSearchParam`): `ListObjects` with `all_owners` / `friends_of_viewer` /
   `owners` (+ `exclude_owners`), `collections`, `meta_filter_json` (tags), `meta_range_json`
   (numeric ranges such as `data_type`), the created/updated bounds and `sort`; mapping table in

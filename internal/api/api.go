@@ -5,8 +5,9 @@
 //	DELETE /internal/accounts/{account}/data         account erasure: every variable, object and pending upload the
 //	                                                 account owns, and their blobs in the bucket; the ratings it made
 //	                                                 (taken out of the totals) and the ratings on its objects
-//	                                                 (X-Internal-Key) -> {"deleted":rows,"blobs":n,
-//	                                                 "ratings_made":n,"ratings_received":n}
+//	                                                 (X-Internal-Key); it is also taken out of other
+//	                                                 objects' recipient lists -> {"deleted":rows,"blobs":n,
+//	                                                 "ratings_made":n,"ratings_received":n,"recipient_of":n}
 package api
 
 import (
@@ -54,7 +55,7 @@ func jsonOut(w http.ResponseWriter, code int, v any) {
 // erase is the account-erasure finaliser's call once the deletion grace period is over; a repeat is a 200.
 func (s *Server) erase(w http.ResponseWriter, r *http.Request) {
 	e, b, err := s.Svc.EraseAccount(r.Context(), r.PathValue("account"))
-	out := map[string]any{"deleted": e.Rows, "blobs": b, "ratings_made": e.RatingsMade, "ratings_received": e.RatingsReceived}
+	out := map[string]any{"deleted": e.Rows, "blobs": b, "ratings_made": e.RatingsMade, "ratings_received": e.RatingsReceived, "recipient_of": e.RecipientOf}
 	switch {
 	case errors.Is(err, service.ErrBadAccount):
 		jsonOut(w, http.StatusBadRequest, map[string]any{"error": "account ids are UUIDs"})

@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.6.0 — 2026-11-05
+
+- Recipients (board openpak/prds#135, gap D2 of nex `docs/core-backed-storage.md`): visibility
+  `VISIBILITY_RECIPIENTS` for objects, with `recipients` (account ids, at most 256) and
+  `recipients_include_friends` on `PutObjectRequest`, `PrepareUploadRequest` and `Object`. Readable
+  by the owner, the named accounts and, with the flag, the owner's friends; the same rule applies to
+  `GetObject`, `GetObjectByID`, `ListObjects` (every scope), `RateObject` and `GetRatings`. A write
+  that sets a visibility replaces the list; one that leaves it unspecified keeps it.
+  `ListObjects.received` keeps objects that name the viewer (NEX `SearchTypeReceived`). Variables
+  and title defaults refuse the new visibility. Existing visibilities answer as before.
+- Friend lists from the account core are cached per account for `TITLE_STORAGE_FRIENDS_CACHE_TTL`
+  (default 2 minutes).
+- Account erasure also takes the account out of every other object's and pending upload's
+  recipient list; the answer adds `"recipient_of"`.
+- Schema: `objects.recipients`, `objects.recipients_friends`, the same on `uploads`, GIN indexes,
+  and the objects visibility check widened to `objects_visibility_v2` (additive, migrated at start).
+
 ## v0.5.0 — 2026-11-05
 
 - Ratings (board openpak/prds#137, gap D4 of nex `docs/core-backed-storage.md`): `InitRating`,

@@ -28,7 +28,8 @@ OpenPak's neutral per-title, per-account storage.
   a body, a stable numeric id, a visibility and an optional expiry. Collections keep several uses
   apart inside one title.
 * **Visibility**: `private` (owner), `friends` (the owner's friends, from the account core),
-  `public`. A title's default is private; adapters state the visibility their console implies.
+  `public`, and for objects `recipients` (the owner, a list of accounts, optionally the owner's
+  friends). A title's default is private; adapters state the visibility their console implies.
 * **Blob tier**: large bodies go to S3 (MinIO) directly from the console with presigned requests
   (`PrepareUpload` -> PUT or POST form -> `CompleteUpload`; reads carry a presigned `get_url`).
   Quota and size cap are checked before the upload, size and digest after it; deletes, expiry,

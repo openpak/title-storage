@@ -30,10 +30,33 @@ mapping per network. A mapping whose title already holds rows refuses to move. S
   `PermissionDenied`. The `setter` string is whatever the adapter wants remembered with the row
   (the PS3 JID); the service stores it as given and compares it for `expect_setter`.
 * A **viewer** (account id, or empty for an anonymous read) sees: its own rows; virtual owners'
-  rows; `public` rows; `friends` rows of its friends. Unreadable rows are left out of lists and
-  answer "not found" on a single get, so a private row cannot be probed.
+  rows; `public` rows; `friends` rows of its friends; `recipients` objects that name it in
+  `recipients`, or of a friend when the object has `recipients_include_friends` (v0.6.0).
+  Unreadable rows are left out of lists and answer "not found" on a single get (and are invisible
+  to `RateObject` / `GetRatings`), so a private row cannot be probed.
 * Every row has a visibility; a write that names none keeps the stored one, a new row takes the
   title's default (`private` until `UpsertTitle` says otherwise).
+* Friend lists come from the account core's `Social.ListFriends`, cached per account for
+  `TITLE_STORAGE_FRIENDS_CACHE_TTL` (default 2 minutes): a new or removed friend shows in reads
+  within that.
+
+### Recipients (v0.6.0)
+
+`VISIBILITY_RECIPIENTS` is for objects only (variables and title defaults refuse it with
+`InvalidArgument`). `PutObject` / `PrepareUpload` carry `recipients[]` (account UUIDs, at most
+256, stored lowercased without repeats) and `recipients_include_friends`; `Object` returns both.
+
+* Readable by the owner, every account in `recipients`, and with `recipients_include_friends` the
+  owner's friends. Nobody else, never an anonymous viewer. NEX DataStore permission 2 (specified)
+  is `recipients`; permission 4 is `recipients` + `recipients_include_friends`.
+* A write that sets a visibility replaces the list and the flag (an empty list clears it); a write
+  with `VISIBILITY_UNSPECIFIED` keeps them. Under another visibility the list is stored and
+  returned as given but grants nothing (NEX keeps `RecipientIDs` on every object).
+* `ListObjects.received = true` keeps only objects whose `recipients` name the viewer (NEX
+  `SearchTypeReceived`); it needs a viewer, and visibility still applies.
+* Erasure takes the account out of every other object's and pending upload's list
+  (`recipient_of` in the answer) and deletes its own objects as before.
+
 
 ## Variables
 
@@ -54,10 +77,10 @@ that prints centiseconds can echo them back and match.
 
 | Call | Meaning |
 | --- | --- |
-| `PutObject(ref, owner, writer, setter, collection, name, info, meta_json, body, visibility, ttl_seconds, condition)` | create or replace. `collection` defaults to `default`; an empty `name` is named by the new id. The numeric `id` is assigned once and survives replacement. `ttl_seconds` sets an expiry (0 keeps the current one). `Condition` is checked against the existing object |
+| `PutObject(ref, owner, writer, setter, collection, name, info, meta_json, body, visibility, recipients[], recipients_include_friends, ttl_seconds, condition)` | create or replace. `collection` defaults to `default`; an empty `name` is named by the new id. The numeric `id` is assigned once and survives replacement. `ttl_seconds` sets an expiry (0 keeps the current one). `Condition` is checked against the existing object |
 | `GetObject(ref, viewer, owner, collection, name, include_body)` | `found=false` for missing, expired or unreadable. With `owner` empty it finds the newest object of that collection and name under any owner (for upload references that are unguessable by construction; the viewer rules still apply) |
 | `GetObjectByID(network, viewer, id, include_body)` | the same by global id |
-| `ListObjects(ref, viewer, owners[] or friends_of_viewer [+include_self] or all_owners, exclude_owners[], collection, collections[], names[], meta_filter_json, meta_range_json, created_after_ms, created_before_ms, updated_after_ms, updated_before_ms, sort, ascending, offset, limit, include_body)` | the search; see below |
+| `ListObjects(ref, viewer, owners[] or friends_of_viewer [+include_self] or all_owners, exclude_owners[], collection, collections[], names[], meta_filter_json, meta_range_json, created_after_ms, created_before_ms, updated_after_ms, updated_before_ms, sort, ascending, offset, limit, include_body, received)` | the search; see below |
 | `DeleteObjects(ref, owner, writer, collection, names[])` | empty `names` = the whole collection |
 | `Usage(ref, owner)` | bytes, objects, variables and the limits that apply |
 
@@ -78,6 +101,7 @@ Every filter is optional and they combine with AND; `hits` is the size of the wh
 | `sort` | `updated` (default), `created`, `size`, `name`, `id`, newest/largest first unless `ascending`; ties by id. `rating:<slot>` sorts by that rating slot's total, `rating_avg:<slot>` by its average (`(total - initial_value) / count`); objects without the slot (or, for the average, without ratings) come last in both directions (v0.5.0) |
 | `min_rating_count` | with a rating sort: only objects whose sorted slot has at least this many ratings (NEX `MinimalRatingFrequency`) |
 | `include_ratings` | every result carries its rating slots (`Object.ratings`), as `GetObjectByID` can |
+| `received` | only objects whose `recipients` name the viewer (v0.6.0; needs a viewer) |
 
 Mapping from NEX `DataStoreSearchParam`: `OwnerType` anybody / friends / anybody-except =
 `all_owners` / `friends_of_viewer` / `all_owners` + `exclude_owners`; `OwnerIDs` = `owners`;
@@ -125,7 +149,7 @@ row stays the index; small objects keep their inline `body` exactly as before.
 
 | Call | Meaning |
 | --- | --- |
-| `PrepareUpload(ref, owner, writer, setter, collection, name, size, sha256, info, meta_json, visibility, ttl_seconds, post_form)` | the write rule, `size <= max_object_bytes` and the quota are checked now; the object `id` is reserved (the existing object's id when `name` already exists); returns `{id, method, put_url, headers, form_fields, expires_unix_ms}`. `post_form=false`: a presigned `PUT` (send `headers`); `true`: an S3 POST policy pinned to the key and the exact size (`form_fields` then the file field `file`), as NEX DataStore consoles upload |
+| `PrepareUpload(ref, owner, writer, setter, collection, name, size, sha256, info, meta_json, visibility, recipients[], recipients_include_friends, ttl_seconds, post_form)` | the write rule, `size <= max_object_bytes` and the quota are checked now; the object `id` is reserved (the existing object's id when `name` already exists); returns `{id, method, put_url, headers, form_fields, expires_unix_ms}`. `post_form=false`: a presigned `PUT` (send `headers`); `true`: an S3 POST policy pinned to the key and the exact size (`form_fields` then the file field `file`), as NEX DataStore consoles upload |
 | `CompleteUpload(id, writer)` | checks the stored size equals `size` (and the SHA-256 when one was given), then the object appears (or replaces the one of that name) with `blob=true`, `size`, `sha256`. A mismatch or a missing body is `FailedPrecondition`; the bad body is deleted and the upload stays open, so the console can send again. An unknown, expired or completed upload is `NotFound` |
 | reads (`GetObject`, `GetObjectByID`, `ListObjects`) | a blob-backed object carries `get_url`, a presigned `GET` signed for the public host; its `body` is always empty, `include_body` or not |
 
@@ -177,7 +201,8 @@ trophies, which have their own cores). If a consumer appears, `object.put` / `ob
 variable, object and pending upload the account owns and their blobs in the bucket, every rating
 the account made (its contribution is subtracted from each slot's total and count, in one
 transaction under the slots' locks) and every rating others made on its objects (they go with the
-objects), and answers `{"deleted": rows, "blobs": n, "ratings_made": n, "ratings_received": n}`; when the bucket fails it answers 502 and the finaliser's repeat
+objects), takes the account out of every other object's and pending upload's recipient list, and
+answers `{"deleted": rows, "blobs": n, "ratings_made": n, "ratings_received": n, "recipient_of": n}`; when the bucket fails it answers 502 and the finaliser's repeat
 deletes the rest (the trash remembers the keys under the account). The `setter` strings other
 owners' rows carry for a writer are adapter-opaque and stay.
 
@@ -189,7 +214,9 @@ global `id`, `meta jsonb`, `body bytea`, `blob_key`/`sha256` for a blob-backed b
 (prepared uploads, the reserved id, `expires_at`), `blob_trash` (bucket keys still to delete).
 `rating_slots` (primary key `(object_id, slot)`, policy, `total`, `rating_count`; foreign key to
 `objects(id)` on delete cascade) and `ratings` (primary key `(object_id, slot, rater)`, `value`,
-`times`, `rated`; cascade from its slot; index on `rater` for erasure). Search indexes: `objects_list (title_key, collection, updated)` and `objects_created (title_key,
+`times`, `rated`; cascade from its slot; index on `rater` for erasure). `objects.recipients` /
+`uploads.recipients` (`text[]`, GIN-indexed for `received` and erasure) and `recipients_friends`;
+the objects visibility check is `objects_visibility_v2` (v0.6.0). Search indexes: `objects_list (title_key, collection, updated)` and `objects_created (title_key,
 collection, created)`; metadata ranges and containment filter within those (no per-key index:
 title sizes do not need one yet).
 `ns` is empty on a cross-network title and the network on

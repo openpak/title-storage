@@ -15,6 +15,7 @@ GOWORK=off go run ./cmd/title-storage
 | `TITLE_STORAGE_DATABASE_URL` | Postgres database `title_storage`; the schema migrates at start |
 | `TITLE_STORAGE_HTTP_ADDR` / `_GRPC_ADDR` / `_METRICS_ADDR` | `:20230` / `:20231` / `:20232` |
 | `TITLE_STORAGE_CORE_ADDRESS`, `TITLE_STORAGE_CORE_INTERNAL_KEY` | the account core gRPC and the key presented there |
+| `TITLE_STORAGE_FRIENDS_CACHE_TTL` | how long a friend list from the core is reused (Go duration, default `2m`) |
 | `TITLE_STORAGE_INTERNAL_KEY` | what adapters (gRPC `x-internal-key`) and the erasure finaliser (`X-Internal-Key`) present |
 | `TITLE_STORAGE_QUOTA_BYTES` / `_QUOTA_OBJECTS` / `_MAX_OBJECT_BYTES` | per-owner-per-title defaults (32 MiB / 256 / 4 MiB); `UpsertTitle` overrides per title. `max_object_bytes` caps uploads too |
 | `TITLE_STORAGE_S3_ENDPOINT` | the blob tier's S3 as this process dials it (`http://openpak-minio:9000`); unset = no blob tier |

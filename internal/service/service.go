@@ -28,6 +28,8 @@ const (
 	MaxOwners    = 1000
 	DefaultLimit = 100
 	MaxLimit     = 1000
+	// MaxRecipients caps an object's recipient list (NEX DataStore sends a handful).
+	MaxRecipients = 256
 )
 
 var (
@@ -99,12 +101,42 @@ func validAccount(a string) error {
 	return nil
 }
 
+// validVis is a variable's (and a title default's) visibility.
 func validVis(v string) error {
 	switch v {
 	case "", store.Private, store.Friends, store.Public:
 		return nil
 	}
 	return ErrBadRequest
+}
+
+// validObjVis is an object's visibility: validVis plus recipients.
+func validObjVis(v string) error {
+	if v == store.Recipients {
+		return nil
+	}
+	return validVis(v)
+}
+
+// cleanRecipients checks a recipient list (account UUIDs, at most MaxRecipients) and returns it
+// lowercased without repeats, in the order given.
+func cleanRecipients(rs []string) ([]string, error) {
+	if len(rs) > MaxRecipients {
+		return nil, ErrTooLarge
+	}
+	out := make([]string, 0, len(rs))
+	seen := make(map[string]bool, len(rs))
+	for _, r := range rs {
+		if err := validAccount(r); err != nil {
+			return nil, err
+		}
+		r = strings.ToLower(r)
+		if !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
 func clamp(n int) int {
@@ -226,30 +258,58 @@ func (s *Service) scope(ctx context.Context, viewer string, owners []string, fri
 	return owners, rd, err
 }
 
-// canRead applies the visibility rule to one row whose owner is already known.
-func (s *Service) canRead(ctx context.Context, viewer, owner, vis string) (bool, error) {
-	if vis == store.Public || IsVirtual(owner) {
+// Access is what the read rule needs of an object.
+type Access struct {
+	Owner, Visibility string
+	Recipients        []string
+	RecipientsFriends bool
+}
+
+// Readable is the object read rule (the Go twin of the store's SQL predicate): public and virtual
+// owners for anyone; otherwise a signed-in viewer that is the owner, a friend of the owner on a
+// friends row, or on a recipients row a named recipient or (with RecipientsFriends) a friend.
+// isFriend is asked only when the answer depends on it.
+func Readable(viewer string, a Access, isFriend func() (bool, error)) (bool, error) {
+	if a.Visibility == store.Public || IsVirtual(a.Owner) {
 		return true, nil
 	}
 	if viewer == "" {
 		return false, nil
 	}
-	if strings.EqualFold(viewer, owner) {
+	if strings.EqualFold(viewer, a.Owner) {
 		return true, nil
 	}
-	if vis != store.Friends {
-		return false, nil
-	}
-	fs, err := s.Core.Friends(ctx, viewer)
-	if err != nil {
-		return false, err
-	}
-	for _, f := range fs {
-		if strings.EqualFold(f, owner) {
-			return true, nil
+	switch a.Visibility {
+	case store.Friends:
+		return isFriend()
+	case store.Recipients:
+		for _, r := range a.Recipients {
+			if strings.EqualFold(r, viewer) {
+				return true, nil
+			}
+		}
+		if a.RecipientsFriends {
+			return isFriend()
 		}
 	}
 	return false, nil
+}
+
+// canRead applies the read rule to one object.
+func (s *Service) canRead(ctx context.Context, viewer string, o *store.Object) (bool, error) {
+	return Readable(viewer, Access{Owner: o.Owner, Visibility: o.Visibility, Recipients: o.Recipients, RecipientsFriends: o.RecipientsFriends},
+		func() (bool, error) {
+			fs, err := s.Core.Friends(ctx, viewer)
+			if err != nil {
+				return false, err
+			}
+			for _, f := range fs {
+				if strings.EqualFold(f, o.Owner) {
+					return true, nil
+				}
+			}
+			return false, nil
+		})
 }
 
 // ---- variables ----
@@ -436,6 +496,8 @@ type Put struct {
 	Meta                  string
 	Body                  []byte
 	Vis                   string
+	Recipients            []string
+	RecipientsFriends     bool
 	TTL                   time.Duration
 	Cond                  Condition
 }
@@ -444,8 +506,12 @@ func (s *Service) PutObject(ctx context.Context, r Ref, p Put) (store.Object, bo
 	if p.Collection == "" {
 		p.Collection = "default"
 	}
-	if !collRE.MatchString(p.Collection) || len(p.Name) > MaxName || validVis(p.Vis) != nil || !store.ValidJSONObject(p.Meta) {
+	if !collRE.MatchString(p.Collection) || len(p.Name) > MaxName || validObjVis(p.Vis) != nil || !store.ValidJSONObject(p.Meta) {
 		return store.Object{}, false, ErrBadRequest
+	}
+	recips, err := cleanRecipients(p.Recipients)
+	if err != nil {
+		return store.Object{}, false, err
 	}
 	if len(p.Info) > MaxInfo || len(p.Meta) > MaxMeta {
 		return store.Object{}, false, ErrTooLarge
@@ -461,7 +527,7 @@ func (s *Service) PutObject(ctx context.Context, r Ref, p Put) (store.Object, bo
 		return store.Object{}, false, ErrTooLarge
 	}
 	put := store.ObjPut{T: t, Network: r.Network, Owner: strings.ToLower(p.Owner), Setter: p.Setter, Collection: p.Collection, Name: p.Name,
-		Info: p.Info, Meta: p.Meta, Body: p.Body, Vis: p.Vis, TTL: p.TTL}
+		Info: p.Info, Meta: p.Meta, Body: p.Body, Vis: p.Vis, Recipients: recips, RecipientsFriends: p.RecipientsFriends, TTL: p.TTL}
 	if !p.Cond.none() {
 		put.Cond = func(cur *store.Object) bool {
 			if cur == nil {
@@ -509,7 +575,7 @@ func (s *Service) GetObject(ctx context.Context, r Ref, viewer, owner, collectio
 	if err != nil || o == nil {
 		return nil, err
 	}
-	ok, err := s.canRead(ctx, viewer, o.Owner, o.Visibility)
+	ok, err := s.canRead(ctx, viewer, o)
 	if err != nil || !ok {
 		return nil, err
 	}
@@ -531,7 +597,7 @@ func (s *Service) GetObjectByID(ctx context.Context, network, viewer string, id 
 	if ns != "" && ns != network {
 		return nil, nil
 	}
-	ok, err := s.canRead(ctx, viewer, o.Owner, o.Visibility)
+	ok, err := s.canRead(ctx, viewer, o)
 	if err != nil || !ok {
 		return nil, err
 	}
@@ -559,6 +625,7 @@ type ObjQuery struct {
 	UpdatedAfter  int64
 	UpdatedBefore int64
 	MinRatings    uint32 // with a rating sort
+	Received      bool   // only objects whose recipients name the viewer
 	Body          bool
 	Ratings       bool // attach every rating slot (Object.Ratings)
 }
@@ -651,6 +718,9 @@ func (s *Service) ListObjects(ctx context.Context, r Ref, q ObjQuery) ([]store.O
 	if q.MinRatings > 0 && ratingSlot == nil {
 		return nil, 0, ErrBadRequest
 	}
+	if q.Received && validAccount(q.Viewer) != nil {
+		return nil, 0, ErrBadRequest
+	}
 	for _, c := range q.Collections {
 		if !collRE.MatchString(c) {
 			return nil, 0, ErrBadRequest
@@ -687,7 +757,7 @@ func (s *Service) ListObjects(ctx context.Context, r Ref, q ObjQuery) ([]store.O
 	os, hits, err := s.Store.ListObjects(ctx, store.ObjQuery{T: t, Network: r.Network, Reader: rd, Owners: owners, AllOwners: q.AllOwners,
 		ExcludeOwners: excl, Collection: q.Collection, Collections: q.Collections, Names: q.Names, MetaFilter: q.MetaFilter, MetaRanges: ranges,
 		CreatedAfter: msTime(q.CreatedAfter), CreatedBefore: msTime(q.CreatedBefore), UpdatedAfter: msTime(q.UpdatedAfter), UpdatedBefore: msTime(q.UpdatedBefore),
-		Sort: q.Sort, RatingSlot: ratingSlot, RatingAvg: ratingAvg, MinRatings: int64(q.MinRatings),
+		Sort: q.Sort, RatingSlot: ratingSlot, RatingAvg: ratingAvg, MinRatings: int64(q.MinRatings), Received: q.Received,
 		Ascending: q.Ascending, Offset: max(q.Offset, 0), Limit: clamp(q.Limit), WithBody: q.Body})
 	for i := range os {
 		if err == nil {
@@ -740,7 +810,8 @@ func (s *Service) Usage(ctx context.Context, r Ref, owner string) (Usage, error)
 }
 
 // EraseAccount is the account-erasure finaliser's call: rows deleted (variables, objects, pending
-// uploads), the ratings it made and the ratings on its objects, and blobs deleted from the bucket.
+// uploads), the ratings it made and the ratings on its objects, the other objects whose recipient
+// lists named it (it is taken out), and blobs deleted from the bucket.
 // The blobs are deleted before it answers; when the bucket fails the rows are already gone and the
 // error asks for the repeat, which finishes the blobs (the trash remembers them under the account).
 func (s *Service) EraseAccount(ctx context.Context, account string) (e store.Erased, blobCount int64, err error) {
@@ -816,6 +887,8 @@ type Prepare struct {
 	Info                  []byte
 	Meta                  string
 	Vis                   string
+	Recipients            []string
+	RecipientsFriends     bool
 	TTL                   time.Duration
 	PostForm              bool
 }
@@ -838,9 +911,13 @@ func (s *Service) PrepareUpload(ctx context.Context, r Ref, p Prepare) (Prepared
 	if p.Collection == "" {
 		p.Collection = "default"
 	}
-	if !collRE.MatchString(p.Collection) || len(p.Name) > MaxName || validVis(p.Vis) != nil || !store.ValidJSONObject(p.Meta) ||
+	if !collRE.MatchString(p.Collection) || len(p.Name) > MaxName || validObjVis(p.Vis) != nil || !store.ValidJSONObject(p.Meta) ||
 		p.Size < 0 || !blobs.ValidDigest(p.SHA256) {
 		return Prepared{}, ErrBadRequest
+	}
+	recips, err := cleanRecipients(p.Recipients)
+	if err != nil {
+		return Prepared{}, err
 	}
 	if len(p.Info) > MaxInfo || len(p.Meta) > MaxMeta {
 		return Prepared{}, ErrTooLarge
@@ -857,7 +934,8 @@ func (s *Service) PrepareUpload(ctx context.Context, r Ref, p Prepare) (Prepared
 	}
 	owner := strings.ToLower(p.Owner)
 	u, err := s.Store.PrepareUpload(ctx, store.Upload{T: t, Network: r.Network, Owner: owner, Setter: p.Setter, Collection: p.Collection,
-		Name: p.Name, Info: p.Info, Meta: p.Meta, Size: p.Size, SHA256: p.SHA256, Vis: p.Vis, TTL: p.TTL, Expires: store.Now().Add(s.uploadTTL())},
+		Name: p.Name, Info: p.Info, Meta: p.Meta, Size: p.Size, SHA256: p.SHA256, Vis: p.Vis, Recipients: recips, RecipientsFriends: p.RecipientsFriends,
+		TTL: p.TTL, Expires: store.Now().Add(s.uploadTTL())},
 		func(id int64) string { return blobKey(id) })
 	if err != nil {
 		return Prepared{}, err

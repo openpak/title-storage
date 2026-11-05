@@ -73,7 +73,7 @@ func (s *Service) RateObject(ctx context.Context, network, rater string, id int6
 	if err != nil || o == nil {
 		return r, false, false, err
 	}
-	if ok, err := s.canRead(ctx, rater, o.Owner, o.Visibility); err != nil || !ok {
+	if ok, err := s.canRead(ctx, rater, o); err != nil || !ok {
 		return r, false, false, err
 	}
 	r, locked, err = s.Store.RateObject(ctx, store.Rate{ID: id, Slot: slot, Rater: rater, Value: value, Policy: p,
@@ -125,7 +125,7 @@ func (s *Service) GetRatings(ctx context.Context, network, viewer string, ids []
 }
 
 // readableIDs keeps the ids of live objects the viewer may read; the friend list is fetched once,
-// only when a friends-only object of someone else is among them.
+// only when the answer for one of them depends on it.
 func (s *Service) readableIDs(ctx context.Context, network, viewer string, ids []int64) ([]int64, error) {
 	objs, err := s.Store.ObjectHeads(ctx, ids)
 	if err != nil {
@@ -137,19 +137,22 @@ func (s *Service) readableIDs(ctx context.Context, network, viewer string, ids [
 		if o.NS != "" && o.NS != network {
 			continue
 		}
-		ok := o.Visibility == store.Public || IsVirtual(o.Owner) || (viewer != "" && o.Owner == viewer)
-		if !ok && viewer != "" && o.Visibility == store.Friends {
-			if friends == nil {
-				fs, err := s.Core.Friends(ctx, viewer)
-				if err != nil {
-					return nil, err
+		ok, err := Readable(viewer, Access{Owner: o.Owner, Visibility: o.Visibility, Recipients: o.Recipients, RecipientsFriends: o.RecipientsFriends},
+			func() (bool, error) {
+				if friends == nil {
+					fs, err := s.Core.Friends(ctx, viewer)
+					if err != nil {
+						return false, err
+					}
+					friends = map[string]bool{}
+					for _, f := range fs {
+						friends[strings.ToLower(f)] = true
+					}
 				}
-				friends = map[string]bool{}
-				for _, f := range fs {
-					friends[strings.ToLower(f)] = true
-				}
-			}
-			ok = friends[o.Owner]
+				return friends[o.Owner], nil
+			})
+		if err != nil {
+			return nil, err
 		}
 		if ok {
 			out = append(out, o.ID)

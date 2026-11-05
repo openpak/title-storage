@@ -64,6 +64,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("title-storage: %v", err)
 	}
+	coreClient.FriendsTTL = envDur("TITLE_STORAGE_FRIENDS_CACHE_TTL", 2*time.Minute)
 	svc := &service.Service{Store: st, Core: coreClient,
 		URLTTL: envDur("TITLE_STORAGE_URL_TTL", 15*time.Minute), UploadTTL: envDur("TITLE_STORAGE_UPLOAD_TTL", time.Hour)}
 	key := os.Getenv("TITLE_STORAGE_INTERNAL_KEY")

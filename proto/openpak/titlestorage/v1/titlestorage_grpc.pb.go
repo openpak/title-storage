@@ -63,7 +63,9 @@ const (
 // shows each network the rows that network wrote itself.
 //
 // Reads take a viewer (a core account id): private rows are visible to their owner only,
-// friends rows to the owner's friends (the account core's friend list), public rows to anyone.
+// friends rows to the owner's friends (the account core's friend list), public rows to anyone,
+// recipients objects (v0.6.0) to their owner and the accounts named in recipients (and, with
+// recipients_include_friends, the owner's friends).
 // Virtual owners are always readable and writable by every account. An empty viewer is an
 // anonymous reader: public rows only. Writes take a writer: it must be the owner, or a
 // virtual owner, or an account the account core lets the writer interact with.
@@ -343,7 +345,9 @@ func (c *titleStorageClient) ListTitles(ctx context.Context, in *ListTitlesReque
 // shows each network the rows that network wrote itself.
 //
 // Reads take a viewer (a core account id): private rows are visible to their owner only,
-// friends rows to the owner's friends (the account core's friend list), public rows to anyone.
+// friends rows to the owner's friends (the account core's friend list), public rows to anyone,
+// recipients objects (v0.6.0) to their owner and the accounts named in recipients (and, with
+// recipients_include_friends, the owner's friends).
 // Virtual owners are always readable and writable by every account. An empty viewer is an
 // anonymous reader: public rows only. Writes take a writer: it must be the owner, or a
 // virtual owner, or an account the account core lets the writer interact with.

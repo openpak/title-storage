@@ -32,6 +32,9 @@ const (
 	Private = "private"
 	Friends = "friends"
 	Public  = "public"
+	// Recipients is objects only: the owner, the accounts in Object.Recipients and, with
+	// RecipientsFriends, the owner's friends.
+	Recipients = "recipients"
 )
 
 // Stamp is the resolution of every stored time: Title User Storage prints centiseconds, so a
@@ -103,6 +106,10 @@ type Object struct {
 	SHA256     string   // the blob's digest when the uploader gave one
 	GetURL     string   // not stored: the presigned GET the service adds to a blob-backed object
 	Ratings    []Rating // not stored here: the rating slots, when the caller asks for them
+	// Recipients (v0.6.0): account ids that may read the object under Visibility "recipients"
+	// (with RecipientsFriends, the owner's friends too).
+	Recipients        []string
+	RecipientsFriends bool
 }
 
 // Reader is who is asking: the viewer's account (empty = anonymous) and, when the query can
@@ -233,6 +240,22 @@ CREATE TABLE IF NOT EXISTS ratings (
     FOREIGN KEY (object_id, slot) REFERENCES rating_slots (object_id, slot) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS ratings_rater ON ratings (rater);
+
+-- Recipients (v0.6.0): visibility 'recipients' on objects (never on variables or as a title
+-- default), the account ids it names, and whether the owner's friends may read too. The visibility
+-- check is widened once (the named constraint marks it done).
+ALTER TABLE objects ADD COLUMN IF NOT EXISTS recipients TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE objects ADD COLUMN IF NOT EXISTS recipients_friends BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE uploads ADD COLUMN IF NOT EXISTS recipients TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE uploads ADD COLUMN IF NOT EXISTS recipients_friends BOOLEAN NOT NULL DEFAULT FALSE;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'objects_visibility_v2' AND conrelid = 'objects'::regclass) THEN
+    ALTER TABLE objects DROP CONSTRAINT IF EXISTS objects_visibility_check;
+    ALTER TABLE objects ADD CONSTRAINT objects_visibility_v2 CHECK (visibility IN ('private','friends','public','recipients'));
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS objects_recipients ON objects USING gin (recipients);
+CREATE INDEX IF NOT EXISTS uploads_recipients ON uploads USING gin (recipients);
 
 INSERT INTO titles (key, name) VALUES ('terraria', 'Terraria') ON CONFLICT DO NOTHING;
 INSERT INTO title_keys (network, native_id, title_key) VALUES ('np', 'NPWR04270_00', 'terraria') ON CONFLICT DO NOTHING;
@@ -498,6 +521,14 @@ func visSQL(v, f int) string {
 	return fmt.Sprintf(`(owner = $%d OR starts_with(owner, 'v:') OR visibility = 'public' OR (visibility = 'friends' AND owner = ANY($%d)))`, v, f)
 }
 
+// objVisSQL is visSQL for objects: it adds the recipients rule (the viewer is named, or the
+// object lets the owner's friends in and the viewer is one). An anonymous viewer (”) is never a
+// recipient: recipients are account UUIDs.
+func objVisSQL(v, f int) string {
+	return fmt.Sprintf(`(owner = $%[1]d OR starts_with(owner, 'v:') OR visibility = 'public' OR (visibility = 'friends' AND owner = ANY($%[2]d))
+		OR (visibility = 'recipients' AND ($%[1]d = ANY(recipients) OR (recipients_friends AND owner = ANY($%[2]d)))))`, v, f)
+}
+
 // ---- variables ----
 
 func isOverflow(err error) bool {
@@ -667,11 +698,11 @@ func nonNil(s []string) []string {
 
 // ---- objects ----
 
-const objCols = `id, title_key, owner, collection, name, info, meta::text, size, setter, visibility, network, created, updated, expires_at, blob_key, sha256`
+const objCols = `id, title_key, owner, collection, name, info, meta::text, size, setter, visibility, network, created, updated, expires_at, blob_key, sha256, recipients, recipients_friends`
 
 // objDst is the scan target list for objCols.
 func objDst(o *Object) []any {
-	return []any{&o.ID, &o.Title, &o.Owner, &o.Collection, &o.Name, &o.Info, &o.Meta, &o.Size, &o.Setter, &o.Visibility, &o.Network, &o.Created, &o.Updated, &o.Expires, &o.BlobKey, &o.SHA256}
+	return []any{&o.ID, &o.Title, &o.Owner, &o.Collection, &o.Name, &o.Info, &o.Meta, &o.Size, &o.Setter, &o.Visibility, &o.Network, &o.Created, &o.Updated, &o.Expires, &o.BlobKey, &o.SHA256, &o.Recipients, &o.RecipientsFriends}
 }
 
 func scanObject(row pgx.Row, withBody bool) (Object, error) {
@@ -711,7 +742,10 @@ type ObjPut struct {
 	Meta       string // JSON object
 	Body       []byte
 	Vis        string // "" keeps the stored value; a new row takes the title default
-	TTL        time.Duration
+	// Recipients and RecipientsFriends replace the stored ones when Vis is set (kept when it is "").
+	Recipients        []string
+	RecipientsFriends bool
+	TTL               time.Duration
 	// Cond reports whether the existing row (nil when missing) satisfies the caller's
 	// condition; a false answer writes nothing.
 	Cond func(*Object) bool
@@ -792,12 +826,15 @@ func (s *Store) PutObject(ctx context.Context, p ObjPut) (o Object, conditionFai
 			return o, false, err
 		}
 	}
-	row := tx.QueryRow(ctx, `INSERT INTO objects (id, title_key, ns, owner, collection, name, info, meta, body, size, setter, visibility, network, created, updated, expires_at)
-		VALUES (COALESCE(NULLIF($1::bigint,0), nextval('objects_id_seq')), $2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$14,$15)
+	row := tx.QueryRow(ctx, `INSERT INTO objects (id, title_key, ns, owner, collection, name, info, meta, body, size, setter, visibility, network, created, updated, expires_at, recipients, recipients_friends)
+		VALUES (COALESCE(NULLIF($1::bigint,0), nextval('objects_id_seq')), $2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$14,$15,$17,$18)
 		ON CONFLICT (title_key, ns, owner, collection, name) DO UPDATE SET info=$7, meta=$8::jsonb, body=$9, size=$10, setter=$11,
-		  visibility = COALESCE(NULLIF($16,''), objects.visibility), network=$13, updated=$14, expires_at=$15, blob_key='', sha256=''
+		  visibility = COALESCE(NULLIF($16,''), objects.visibility), network=$13, updated=$14, expires_at=$15, blob_key='', sha256='',
+		  recipients = CASE WHEN $16 = '' THEN objects.recipients ELSE $17 END,
+		  recipients_friends = CASE WHEN $16 = '' THEN objects.recipients_friends ELSE $18 END
 		RETURNING `+objCols,
-		id, p.T.Key, ns, p.Owner, p.Collection, p.Name, p.Info, p.Meta, p.Body, int64(len(p.Body)), p.Setter, firstNonEmpty(p.Vis, p.T.DefaultVis), p.Network, now, expires, p.Vis)
+		id, p.T.Key, ns, p.Owner, p.Collection, p.Name, p.Info, p.Meta, p.Body, int64(len(p.Body)), p.Setter, firstNonEmpty(p.Vis, p.T.DefaultVis), p.Network, now, expires, p.Vis,
+		nonNil(p.Recipients), p.RecipientsFriends)
 	o, err = scanObject(row, false)
 	if err != nil {
 		return o, false, err
@@ -884,6 +921,7 @@ type ObjQuery struct {
 	RatingSlot    *int32 // sort by this rating slot instead (objects without the slot last)
 	RatingAvg     bool   // by its average rating, (total - initial) / count, instead of its total
 	MinRatings    int64  // with RatingSlot: at least this many ratings
+	Received      bool   // only objects whose recipients name Reader.Viewer
 	Ascending     bool
 	Offset        int
 	Limit         int
@@ -903,7 +941,7 @@ func (s *Store) ListObjects(ctx context.Context, q ObjQuery) ([]Object, int, err
 		col = "updated"
 	}
 	args := []any{q.T.Key, q.T.NS(q.Network), q.Reader.Viewer, nonNil(q.Reader.Friends)}
-	where := `title_key=$1 AND ns=$2 AND (expires_at IS NULL OR expires_at > now()) AND ` + visSQL(3, 4)
+	where := `title_key=$1 AND ns=$2 AND (expires_at IS NULL OR expires_at > now()) AND ` + objVisSQL(3, 4)
 	arg := func(v any) string {
 		args = append(args, v)
 		return fmt.Sprintf("$%d", len(args))
@@ -913,6 +951,9 @@ func (s *Store) ListObjects(ctx context.Context, q ObjQuery) ([]Object, int, err
 	}
 	if len(q.ExcludeOwners) > 0 {
 		where += ` AND NOT (owner = ANY(` + arg(q.ExcludeOwners) + `))`
+	}
+	if q.Received {
+		where += ` AND recipients @> ARRAY[$3::text]`
 	}
 	switch colls := append([]string(nil), q.Collections...); {
 	case q.Collection != "" && len(colls) == 0:
@@ -1017,11 +1058,13 @@ type Erased struct {
 	Rows            int64 // variables, objects and pending uploads the account owned
 	RatingsMade     int64 // ratings the account gave (their values taken back out of the totals)
 	RatingsReceived int64 // other raters' ratings on the account's objects (gone with the objects)
+	RecipientOf     int64 // others' objects and pending uploads whose recipient lists named the account (it is taken out)
 }
 
 // EraseAccount deletes everything an account owns, in every title: variables, objects (with
 // their rating slots and every rating on them) and pending uploads, and every rating the account
-// made on anyone's objects, subtracting it from those slots. Blobs go to the trash under the
+// made on anyone's objects, subtracting it from those slots; it is taken out of every other
+// object's (and pending upload's) recipient list. Blobs go to the trash under the
 // account (the caller empties it: DrainTrash).
 func (s *Store) EraseAccount(ctx context.Context, account string) (Erased, error) {
 	var e Erased
@@ -1055,6 +1098,12 @@ func (s *Store) EraseAccount(ctx context.Context, account string) (Erased, error
 		SELECT (SELECT count(*) FROM v) + (SELECT count(*) FROM o) + (SELECT count(*) FROM u)`, account).Scan(&e.Rows); err != nil {
 		return e, err
 	}
+	// Its own rows are gone, so what is left naming it belongs to others.
+	if err = tx.QueryRow(ctx, `WITH o AS (UPDATE objects SET recipients = array_remove(recipients, $1) WHERE recipients @> ARRAY[$1::text] RETURNING 1),
+		u AS (UPDATE uploads SET recipients = array_remove(recipients, $1) WHERE recipients @> ARRAY[$1::text] RETURNING 1)
+		SELECT (SELECT count(*) FROM o) + (SELECT count(*) FROM u)`, account).Scan(&e.RecipientOf); err != nil {
+		return e, err
+	}
 	return e, tx.Commit(ctx)
 }
 
@@ -1077,21 +1126,23 @@ func used(ctx context.Context, tx pgx.Tx, titleKey, owner string) (bytes int64, 
 
 // Upload is a prepared write: the object it will become, waiting for its body in the blob tier.
 type Upload struct {
-	ID         int64
-	T          Title
-	Network    string
-	Owner      string
-	Setter     string
-	Collection string
-	Name       string // "" = named by the id
-	Info       []byte
-	Meta       string
-	Size       int64
-	SHA256     string
-	Vis        string
-	TTL        time.Duration // of the object once complete
-	BlobKey    string
-	Expires    time.Time // of the upload
+	ID                int64
+	T                 Title
+	Network           string
+	Owner             string
+	Setter            string
+	Collection        string
+	Name              string // "" = named by the id
+	Info              []byte
+	Meta              string
+	Size              int64
+	SHA256            string
+	Vis               string
+	Recipients        []string
+	RecipientsFriends bool
+	TTL               time.Duration // of the object once complete
+	BlobKey           string
+	Expires           time.Time // of the upload
 }
 
 // PrepareUpload reserves the object's id and the quota for an upload. A second prepare for the
@@ -1158,9 +1209,10 @@ func (s *Store) PrepareUpload(ctx context.Context, u Upload, keyFor func(id int6
 	}
 	u.BlobKey = keyFor(u.ID)
 	now := Now()
-	_, err = tx.Exec(ctx, `INSERT INTO uploads (id, title_key, ns, owner, collection, name, info, meta, size, sha256, setter, visibility, network, ttl_seconds, blob_key, created, expires_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
-		u.ID, u.T.Key, ns, u.Owner, u.Collection, u.Name, u.Info, u.Meta, u.Size, u.SHA256, u.Setter, u.Vis, u.Network, int(u.TTL/time.Second), u.BlobKey, now, u.Expires)
+	_, err = tx.Exec(ctx, `INSERT INTO uploads (id, title_key, ns, owner, collection, name, info, meta, size, sha256, setter, visibility, network, ttl_seconds, blob_key, created, expires_at, recipients, recipients_friends)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+		u.ID, u.T.Key, ns, u.Owner, u.Collection, u.Name, u.Info, u.Meta, u.Size, u.SHA256, u.Setter, u.Vis, u.Network, int(u.TTL/time.Second), u.BlobKey, now, u.Expires,
+		nonNil(u.Recipients), u.RecipientsFriends)
 	if err != nil {
 		return u, err
 	}
@@ -1223,8 +1275,8 @@ func (s *Store) CompleteUpload(ctx context.Context, id int64, blobKey string) (o
 	var ns, vis string
 	var ttl int
 	err = tx.QueryRow(ctx, `DELETE FROM uploads WHERE id=$1 AND blob_key=$2 AND expires_at > now()
-		RETURNING title_key, ns, network, owner, setter, collection, name, info, meta::text, size, sha256, visibility, ttl_seconds`, id, blobKey).
-		Scan(&u.T.Key, &ns, &u.Network, &u.Owner, &u.Setter, &u.Collection, &u.Name, &u.Info, &u.Meta, &u.Size, &u.SHA256, &vis, &ttl)
+		RETURNING title_key, ns, network, owner, setter, collection, name, info, meta::text, size, sha256, visibility, ttl_seconds, recipients, recipients_friends`, id, blobKey).
+		Scan(&u.T.Key, &ns, &u.Network, &u.Owner, &u.Setter, &u.Collection, &u.Name, &u.Info, &u.Meta, &u.Size, &u.SHA256, &vis, &ttl, &u.Recipients, &u.RecipientsFriends)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return o, false, nil
 	}
@@ -1260,12 +1312,15 @@ func (s *Store) CompleteUpload(ctx context.Context, id int64, blobKey string) (o
 	} else if cur != nil {
 		expires = cur.Expires
 	}
-	o, err = scanObject(tx.QueryRow(ctx, `INSERT INTO objects (id, title_key, ns, owner, collection, name, info, meta, body, size, setter, visibility, network, created, updated, expires_at, blob_key, sha256)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,''::bytea,$9,$10,$11,$12,$13,$13,$14,$15,$16)
+	o, err = scanObject(tx.QueryRow(ctx, `INSERT INTO objects (id, title_key, ns, owner, collection, name, info, meta, body, size, setter, visibility, network, created, updated, expires_at, blob_key, sha256, recipients, recipients_friends)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,''::bytea,$9,$10,$11,$12,$13,$13,$14,$15,$16,$18,$19)
 		ON CONFLICT (title_key, ns, owner, collection, name) DO UPDATE SET info=$7, meta=$8::jsonb, body=''::bytea, size=$9, setter=$10,
-		  visibility = COALESCE(NULLIF($17,''), objects.visibility), network=$12, updated=$13, expires_at=$14, blob_key=$15, sha256=$16
+		  visibility = COALESCE(NULLIF($17,''), objects.visibility), network=$12, updated=$13, expires_at=$14, blob_key=$15, sha256=$16,
+		  recipients = CASE WHEN $17 = '' THEN objects.recipients ELSE $18 END,
+		  recipients_friends = CASE WHEN $17 = '' THEN objects.recipients_friends ELSE $19 END
 		RETURNING `+objCols,
-		id, u.T.Key, ns, u.Owner, u.Collection, u.Name, u.Info, u.Meta, u.Size, u.Setter, firstNonEmpty(vis, t.DefaultVis), u.Network, now, expires, blobKey, u.SHA256, vis), false)
+		id, u.T.Key, ns, u.Owner, u.Collection, u.Name, u.Info, u.Meta, u.Size, u.Setter, firstNonEmpty(vis, t.DefaultVis), u.Network, now, expires, blobKey, u.SHA256, vis,
+		nonNil(u.Recipients), u.RecipientsFriends), false)
 	if err != nil {
 		return o, false, err
 	}

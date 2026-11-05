@@ -22,7 +22,9 @@ option go_package = "github.com/openpak/title-storage/proto/openpak/titlestorage
 // shows each network the rows that network wrote itself.
 //
 // Reads take a viewer (a core account id): private rows are visible to their owner only,
-// friends rows to the owner's friends (the account core's friend list), public rows to anyone.
+// friends rows to the owner's friends (the account core's friend list), public rows to anyone,
+// recipients objects (v0.6.0) to their owner and the accounts named in recipients (and, with
+// recipients_include_friends, the owner's friends).
 // Virtual owners are always readable and writable by every account. An empty viewer is an
 // anonymous reader: public rows only. Writes take a writer: it must be the owner, or a
 // virtual owner, or an account the account core lets the writer interact with.
@@ -88,6 +90,10 @@ enum Visibility {
   VISIBILITY_PRIVATE     = 1;
   VISIBILITY_FRIENDS     = 2;
   VISIBILITY_PUBLIC      = 3;
+  // Objects only (v0.6.0; InvalidArgument on variables and as a title default): readable by the
+  // owner and the accounts in Object.recipients, plus the owner's friends when
+  // recipients_include_friends is set (NEX DataStore permission 2 "specified" and 4).
+  VISIBILITY_RECIPIENTS  = 4;
 }
 
 // Condition is the Title User Storage "comp-date" / "comp-setter" check: the write only happens
@@ -208,6 +214,10 @@ message Object {
   bool   blob        = 17;
   string sha256      = 18; // hex, when the uploader gave one
   repeated Rating ratings = 19; // with include_ratings (v0.5.0): every rating slot of the object
+  // Recipients (v0.6.0): account ids (lowercase UUIDs). They grant reads only under
+  // VISIBILITY_RECIPIENTS; under another visibility they are stored and returned as given.
+  repeated string recipients = 20;
+  bool recipients_include_friends = 21;
 }
 
 message PutObjectRequest {
@@ -223,6 +233,10 @@ message PutObjectRequest {
   Visibility visibility = 10;
   uint32 ttl_seconds = 11; // 0 = keeps its current expiry (never for a new object)
   Condition condition = 12;
+  // v0.6.0: stored whenever visibility is set (replacing the stored list, an empty list clears it);
+  // with VISIBILITY_UNSPECIFIED the stored recipients and flag are kept. At most 256 account ids.
+  repeated string recipients = 13;
+  bool recipients_include_friends = 14;
 }
 
 message GetObjectRequest {
@@ -284,6 +298,9 @@ message ListObjectsRequest {
   // MinimalRatingFrequency); needs a rating sort.
   uint32 min_rating_count = 22;
   bool include_ratings    = 23;
+  // v0.6.0: only objects whose recipients name the viewer (NEX SearchTypeReceived); needs a viewer.
+  // Visibility still applies, so a private object naming the viewer stays hidden.
+  bool received           = 24;
 }
 message ListObjectsResponse {
   repeated Object objects = 1;
@@ -314,6 +331,8 @@ message PrepareUploadRequest {
   Visibility visibility = 11;
   uint32 ttl_seconds = 12; // of the object once complete (0 keeps the current expiry)
   bool post_form  = 13;  // false: a PUT URL; true: a POST form (S3 POST policy, as NEX DataStore consoles send)
+  repeated string recipients = 14; // v0.6.0: as PutObjectRequest, applied at CompleteUpload
+  bool recipients_include_friends = 15;
 }
 
 message PrepareUploadResponse {

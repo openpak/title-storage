@@ -28,6 +28,10 @@ const (
 	Visibility_VISIBILITY_PRIVATE     Visibility = 1
 	Visibility_VISIBILITY_FRIENDS     Visibility = 2
 	Visibility_VISIBILITY_PUBLIC      Visibility = 3
+	// Objects only (v0.6.0; InvalidArgument on variables and as a title default): readable by the
+	// owner and the accounts in Object.recipients, plus the owner's friends when
+	// recipients_include_friends is set (NEX DataStore permission 2 "specified" and 4).
+	Visibility_VISIBILITY_RECIPIENTS Visibility = 4
 )
 
 // Enum value maps for Visibility.
@@ -37,12 +41,14 @@ var (
 		1: "VISIBILITY_PRIVATE",
 		2: "VISIBILITY_FRIENDS",
 		3: "VISIBILITY_PUBLIC",
+		4: "VISIBILITY_RECIPIENTS",
 	}
 	Visibility_value = map[string]int32{
 		"VISIBILITY_UNSPECIFIED": 0,
 		"VISIBILITY_PRIVATE":     1,
 		"VISIBILITY_FRIENDS":     2,
 		"VISIBILITY_PUBLIC":      3,
+		"VISIBILITY_RECIPIENTS":  4,
 	}
 )
 
@@ -1086,12 +1092,16 @@ type Object struct {
 	UpdatedUnixMs int64                  `protobuf:"varint,14,opt,name=updated_unix_ms,json=updatedUnixMs,proto3" json:"updated_unix_ms,omitempty"`
 	ExpiresUnixMs int64                  `protobuf:"varint,15,opt,name=expires_unix_ms,json=expiresUnixMs,proto3" json:"expires_unix_ms,omitempty"` // 0 = never
 	// Blob tier: set when the body lives in S3 (body is then always empty, include_body or not).
-	GetUrl        string    `protobuf:"bytes,16,opt,name=get_url,json=getUrl,proto3" json:"get_url,omitempty"` // presigned GET, short-lived; empty for an inline object
-	Blob          bool      `protobuf:"varint,17,opt,name=blob,proto3" json:"blob,omitempty"`
-	Sha256        string    `protobuf:"bytes,18,opt,name=sha256,proto3" json:"sha256,omitempty"`   // hex, when the uploader gave one
-	Ratings       []*Rating `protobuf:"bytes,19,rep,name=ratings,proto3" json:"ratings,omitempty"` // with include_ratings (v0.5.0): every rating slot of the object
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	GetUrl  string    `protobuf:"bytes,16,opt,name=get_url,json=getUrl,proto3" json:"get_url,omitempty"` // presigned GET, short-lived; empty for an inline object
+	Blob    bool      `protobuf:"varint,17,opt,name=blob,proto3" json:"blob,omitempty"`
+	Sha256  string    `protobuf:"bytes,18,opt,name=sha256,proto3" json:"sha256,omitempty"`   // hex, when the uploader gave one
+	Ratings []*Rating `protobuf:"bytes,19,rep,name=ratings,proto3" json:"ratings,omitempty"` // with include_ratings (v0.5.0): every rating slot of the object
+	// Recipients (v0.6.0): account ids (lowercase UUIDs). They grant reads only under
+	// VISIBILITY_RECIPIENTS; under another visibility they are stored and returned as given.
+	Recipients               []string `protobuf:"bytes,20,rep,name=recipients,proto3" json:"recipients,omitempty"`
+	RecipientsIncludeFriends bool     `protobuf:"varint,21,opt,name=recipients_include_friends,json=recipientsIncludeFriends,proto3" json:"recipients_include_friends,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *Object) Reset() {
@@ -1257,22 +1267,40 @@ func (x *Object) GetRatings() []*Rating {
 	return nil
 }
 
+func (x *Object) GetRecipients() []string {
+	if x != nil {
+		return x.Recipients
+	}
+	return nil
+}
+
+func (x *Object) GetRecipientsIncludeFriends() bool {
+	if x != nil {
+		return x.RecipientsIncludeFriends
+	}
+	return false
+}
+
 type PutObjectRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ref           *TitleRef              `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	Owner         string                 `protobuf:"bytes,2,opt,name=owner,proto3" json:"owner,omitempty"`
-	Writer        string                 `protobuf:"bytes,3,opt,name=writer,proto3" json:"writer,omitempty"`
-	Setter        string                 `protobuf:"bytes,4,opt,name=setter,proto3" json:"setter,omitempty"`
-	Collection    string                 `protobuf:"bytes,5,opt,name=collection,proto3" json:"collection,omitempty"` // default "default"
-	Name          string                 `protobuf:"bytes,6,opt,name=name,proto3" json:"name,omitempty"`             // empty: a new object named by its id
-	Info          []byte                 `protobuf:"bytes,7,opt,name=info,proto3" json:"info,omitempty"`
-	MetaJson      string                 `protobuf:"bytes,8,opt,name=meta_json,json=metaJson,proto3" json:"meta_json,omitempty"`
-	Body          []byte                 `protobuf:"bytes,9,opt,name=body,proto3" json:"body,omitempty"`
-	Visibility    Visibility             `protobuf:"varint,10,opt,name=visibility,proto3,enum=openpak.titlestorage.v1.Visibility" json:"visibility,omitempty"`
-	TtlSeconds    uint32                 `protobuf:"varint,11,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"` // 0 = keeps its current expiry (never for a new object)
-	Condition     *Condition             `protobuf:"bytes,12,opt,name=condition,proto3" json:"condition,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Ref        *TitleRef              `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
+	Owner      string                 `protobuf:"bytes,2,opt,name=owner,proto3" json:"owner,omitempty"`
+	Writer     string                 `protobuf:"bytes,3,opt,name=writer,proto3" json:"writer,omitempty"`
+	Setter     string                 `protobuf:"bytes,4,opt,name=setter,proto3" json:"setter,omitempty"`
+	Collection string                 `protobuf:"bytes,5,opt,name=collection,proto3" json:"collection,omitempty"` // default "default"
+	Name       string                 `protobuf:"bytes,6,opt,name=name,proto3" json:"name,omitempty"`             // empty: a new object named by its id
+	Info       []byte                 `protobuf:"bytes,7,opt,name=info,proto3" json:"info,omitempty"`
+	MetaJson   string                 `protobuf:"bytes,8,opt,name=meta_json,json=metaJson,proto3" json:"meta_json,omitempty"`
+	Body       []byte                 `protobuf:"bytes,9,opt,name=body,proto3" json:"body,omitempty"`
+	Visibility Visibility             `protobuf:"varint,10,opt,name=visibility,proto3,enum=openpak.titlestorage.v1.Visibility" json:"visibility,omitempty"`
+	TtlSeconds uint32                 `protobuf:"varint,11,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"` // 0 = keeps its current expiry (never for a new object)
+	Condition  *Condition             `protobuf:"bytes,12,opt,name=condition,proto3" json:"condition,omitempty"`
+	// v0.6.0: stored whenever visibility is set (replacing the stored list, an empty list clears it);
+	// with VISIBILITY_UNSPECIFIED the stored recipients and flag are kept. At most 256 account ids.
+	Recipients               []string `protobuf:"bytes,13,rep,name=recipients,proto3" json:"recipients,omitempty"`
+	RecipientsIncludeFriends bool     `protobuf:"varint,14,opt,name=recipients_include_friends,json=recipientsIncludeFriends,proto3" json:"recipients_include_friends,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *PutObjectRequest) Reset() {
@@ -1387,6 +1415,20 @@ func (x *PutObjectRequest) GetCondition() *Condition {
 		return x.Condition
 	}
 	return nil
+}
+
+func (x *PutObjectRequest) GetRecipients() []string {
+	if x != nil {
+		return x.Recipients
+	}
+	return nil
+}
+
+func (x *PutObjectRequest) GetRecipientsIncludeFriends() bool {
+	if x != nil {
+		return x.RecipientsIncludeFriends
+	}
+	return false
 }
 
 type GetObjectRequest struct {
@@ -1646,8 +1688,11 @@ type ListObjectsRequest struct {
 	// MinimalRatingFrequency); needs a rating sort.
 	MinRatingCount uint32 `protobuf:"varint,22,opt,name=min_rating_count,json=minRatingCount,proto3" json:"min_rating_count,omitempty"`
 	IncludeRatings bool   `protobuf:"varint,23,opt,name=include_ratings,json=includeRatings,proto3" json:"include_ratings,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// v0.6.0: only objects whose recipients name the viewer (NEX SearchTypeReceived); needs a viewer.
+	// Visibility still applies, so a private object naming the viewer stays hidden.
+	Received      bool `protobuf:"varint,24,opt,name=received,proto3" json:"received,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ListObjectsRequest) Reset() {
@@ -1841,6 +1886,13 @@ func (x *ListObjectsRequest) GetIncludeRatings() bool {
 	return false
 }
 
+func (x *ListObjectsRequest) GetReceived() bool {
+	if x != nil {
+		return x.Received
+	}
+	return false
+}
+
 type ListObjectsResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Objects       []*Object              `protobuf:"bytes,1,rep,name=objects,proto3" json:"objects,omitempty"`
@@ -1970,22 +2022,24 @@ func (x *DeleteObjectsRequest) GetNames() []string {
 }
 
 type PrepareUploadRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ref           *TitleRef              `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	Owner         string                 `protobuf:"bytes,2,opt,name=owner,proto3" json:"owner,omitempty"`
-	Writer        string                 `protobuf:"bytes,3,opt,name=writer,proto3" json:"writer,omitempty"`
-	Setter        string                 `protobuf:"bytes,4,opt,name=setter,proto3" json:"setter,omitempty"`
-	Collection    string                 `protobuf:"bytes,5,opt,name=collection,proto3" json:"collection,omitempty"` // default "default"
-	Name          string                 `protobuf:"bytes,6,opt,name=name,proto3" json:"name,omitempty"`             // empty: a new object named by its id
-	Size          uint64                 `protobuf:"varint,7,opt,name=size,proto3" json:"size,omitempty"`            // exact body size; at most the title's max_object_bytes, within quota
-	Sha256        string                 `protobuf:"bytes,8,opt,name=sha256,proto3" json:"sha256,omitempty"`         // optional lowercase hex; CompleteUpload checks it
-	Info          []byte                 `protobuf:"bytes,9,opt,name=info,proto3" json:"info,omitempty"`
-	MetaJson      string                 `protobuf:"bytes,10,opt,name=meta_json,json=metaJson,proto3" json:"meta_json,omitempty"`
-	Visibility    Visibility             `protobuf:"varint,11,opt,name=visibility,proto3,enum=openpak.titlestorage.v1.Visibility" json:"visibility,omitempty"`
-	TtlSeconds    uint32                 `protobuf:"varint,12,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"` // of the object once complete (0 keeps the current expiry)
-	PostForm      bool                   `protobuf:"varint,13,opt,name=post_form,json=postForm,proto3" json:"post_form,omitempty"`       // false: a PUT URL; true: a POST form (S3 POST policy, as NEX DataStore consoles send)
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state                    protoimpl.MessageState `protogen:"open.v1"`
+	Ref                      *TitleRef              `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
+	Owner                    string                 `protobuf:"bytes,2,opt,name=owner,proto3" json:"owner,omitempty"`
+	Writer                   string                 `protobuf:"bytes,3,opt,name=writer,proto3" json:"writer,omitempty"`
+	Setter                   string                 `protobuf:"bytes,4,opt,name=setter,proto3" json:"setter,omitempty"`
+	Collection               string                 `protobuf:"bytes,5,opt,name=collection,proto3" json:"collection,omitempty"` // default "default"
+	Name                     string                 `protobuf:"bytes,6,opt,name=name,proto3" json:"name,omitempty"`             // empty: a new object named by its id
+	Size                     uint64                 `protobuf:"varint,7,opt,name=size,proto3" json:"size,omitempty"`            // exact body size; at most the title's max_object_bytes, within quota
+	Sha256                   string                 `protobuf:"bytes,8,opt,name=sha256,proto3" json:"sha256,omitempty"`         // optional lowercase hex; CompleteUpload checks it
+	Info                     []byte                 `protobuf:"bytes,9,opt,name=info,proto3" json:"info,omitempty"`
+	MetaJson                 string                 `protobuf:"bytes,10,opt,name=meta_json,json=metaJson,proto3" json:"meta_json,omitempty"`
+	Visibility               Visibility             `protobuf:"varint,11,opt,name=visibility,proto3,enum=openpak.titlestorage.v1.Visibility" json:"visibility,omitempty"`
+	TtlSeconds               uint32                 `protobuf:"varint,12,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"` // of the object once complete (0 keeps the current expiry)
+	PostForm                 bool                   `protobuf:"varint,13,opt,name=post_form,json=postForm,proto3" json:"post_form,omitempty"`       // false: a PUT URL; true: a POST form (S3 POST policy, as NEX DataStore consoles send)
+	Recipients               []string               `protobuf:"bytes,14,rep,name=recipients,proto3" json:"recipients,omitempty"`                    // v0.6.0: as PutObjectRequest, applied at CompleteUpload
+	RecipientsIncludeFriends bool                   `protobuf:"varint,15,opt,name=recipients_include_friends,json=recipientsIncludeFriends,proto3" json:"recipients_include_friends,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *PrepareUploadRequest) Reset() {
@@ -2105,6 +2159,20 @@ func (x *PrepareUploadRequest) GetTtlSeconds() uint32 {
 func (x *PrepareUploadRequest) GetPostForm() bool {
 	if x != nil {
 		return x.PostForm
+	}
+	return false
+}
+
+func (x *PrepareUploadRequest) GetRecipients() []string {
+	if x != nil {
+		return x.Recipients
+	}
+	return nil
+}
+
+func (x *PrepareUploadRequest) GetRecipientsIncludeFriends() bool {
+	if x != nil {
+		return x.RecipientsIncludeFriends
 	}
 	return false
 }
@@ -3500,7 +3568,7 @@ const file_openpak_titlestorage_v1_titlestorage_proto_rawDesc = "" +
 	"\x06writer\x18\x03 \x01(\tR\x06writer\x12\x14\n" +
 	"\x05slots\x18\x04 \x03(\x05R\x05slots\"*\n" +
 	"\x0eDeleteResponse\x12\x18\n" +
-	"\adeleted\x18\x01 \x01(\rR\adeleted\"\xc0\x04\n" +
+	"\adeleted\x18\x01 \x01(\rR\adeleted\"\x9e\x05\n" +
 	"\x06Object\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x04R\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12\x14\n" +
@@ -3525,7 +3593,11 @@ const file_openpak_titlestorage_v1_titlestorage_proto_rawDesc = "" +
 	"\aget_url\x18\x10 \x01(\tR\x06getUrl\x12\x12\n" +
 	"\x04blob\x18\x11 \x01(\bR\x04blob\x12\x16\n" +
 	"\x06sha256\x18\x12 \x01(\tR\x06sha256\x129\n" +
-	"\aratings\x18\x13 \x03(\v2\x1f.openpak.titlestorage.v1.RatingR\aratings\"\xae\x03\n" +
+	"\aratings\x18\x13 \x03(\v2\x1f.openpak.titlestorage.v1.RatingR\aratings\x12\x1e\n" +
+	"\n" +
+	"recipients\x18\x14 \x03(\tR\n" +
+	"recipients\x12<\n" +
+	"\x1arecipients_include_friends\x18\x15 \x01(\bR\x18recipientsIncludeFriends\"\x8c\x04\n" +
 	"\x10PutObjectRequest\x123\n" +
 	"\x03ref\x18\x01 \x01(\v2!.openpak.titlestorage.v1.TitleRefR\x03ref\x12\x14\n" +
 	"\x05owner\x18\x02 \x01(\tR\x05owner\x12\x16\n" +
@@ -3544,7 +3616,11 @@ const file_openpak_titlestorage_v1_titlestorage_proto_rawDesc = "" +
 	"visibility\x12\x1f\n" +
 	"\vttl_seconds\x18\v \x01(\rR\n" +
 	"ttlSeconds\x12@\n" +
-	"\tcondition\x18\f \x01(\v2\".openpak.titlestorage.v1.ConditionR\tcondition\"\xcc\x01\n" +
+	"\tcondition\x18\f \x01(\v2\".openpak.titlestorage.v1.ConditionR\tcondition\x12\x1e\n" +
+	"\n" +
+	"recipients\x18\r \x03(\tR\n" +
+	"recipients\x12<\n" +
+	"\x1arecipients_include_friends\x18\x0e \x01(\bR\x18recipientsIncludeFriends\"\xcc\x01\n" +
 	"\x10GetObjectRequest\x123\n" +
 	"\x03ref\x18\x01 \x01(\v2!.openpak.titlestorage.v1.TitleRefR\x03ref\x12\x16\n" +
 	"\x06viewer\x18\x02 \x01(\tR\x06viewer\x12\x14\n" +
@@ -3563,7 +3639,7 @@ const file_openpak_titlestorage_v1_titlestorage_proto_rawDesc = "" +
 	"\x0eObjectResponse\x127\n" +
 	"\x06object\x18\x01 \x01(\v2\x1f.openpak.titlestorage.v1.ObjectR\x06object\x12\x14\n" +
 	"\x05found\x18\x02 \x01(\bR\x05found\x12)\n" +
-	"\x10condition_failed\x18\x03 \x01(\bR\x0fconditionFailed\"\xba\x06\n" +
+	"\x10condition_failed\x18\x03 \x01(\bR\x0fconditionFailed\"\xd6\x06\n" +
 	"\x12ListObjectsRequest\x123\n" +
 	"\x03ref\x18\x01 \x01(\v2!.openpak.titlestorage.v1.TitleRefR\x03ref\x12\x16\n" +
 	"\x06viewer\x18\x02 \x01(\tR\x06viewer\x12\x16\n" +
@@ -3591,7 +3667,8 @@ const file_openpak_titlestorage_v1_titlestorage_proto_rawDesc = "" +
 	"\x11updated_before_ms\x18\x14 \x01(\x03R\x0fupdatedBeforeMs\x12 \n" +
 	"\vcollections\x18\x15 \x03(\tR\vcollections\x12(\n" +
 	"\x10min_rating_count\x18\x16 \x01(\rR\x0eminRatingCount\x12'\n" +
-	"\x0finclude_ratings\x18\x17 \x01(\bR\x0eincludeRatings\"d\n" +
+	"\x0finclude_ratings\x18\x17 \x01(\bR\x0eincludeRatings\x12\x1a\n" +
+	"\breceived\x18\x18 \x01(\bR\breceived\"d\n" +
 	"\x13ListObjectsResponse\x129\n" +
 	"\aobjects\x18\x01 \x03(\v2\x1f.openpak.titlestorage.v1.ObjectR\aobjects\x12\x12\n" +
 	"\x04hits\x18\x02 \x01(\rR\x04hits\"\xaf\x01\n" +
@@ -3602,7 +3679,7 @@ const file_openpak_titlestorage_v1_titlestorage_proto_rawDesc = "" +
 	"\n" +
 	"collection\x18\x04 \x01(\tR\n" +
 	"collection\x12\x14\n" +
-	"\x05names\x18\x05 \x03(\tR\x05names\"\xa5\x03\n" +
+	"\x05names\x18\x05 \x03(\tR\x05names\"\x83\x04\n" +
 	"\x14PrepareUploadRequest\x123\n" +
 	"\x03ref\x18\x01 \x01(\v2!.openpak.titlestorage.v1.TitleRefR\x03ref\x12\x14\n" +
 	"\x05owner\x18\x02 \x01(\tR\x05owner\x12\x16\n" +
@@ -3622,7 +3699,11 @@ const file_openpak_titlestorage_v1_titlestorage_proto_rawDesc = "" +
 	"visibility\x12\x1f\n" +
 	"\vttl_seconds\x18\f \x01(\rR\n" +
 	"ttlSeconds\x12\x1b\n" +
-	"\tpost_form\x18\r \x01(\bR\bpostForm\"\xb3\x03\n" +
+	"\tpost_form\x18\r \x01(\bR\bpostForm\x12\x1e\n" +
+	"\n" +
+	"recipients\x18\x0e \x03(\tR\n" +
+	"recipients\x12<\n" +
+	"\x1arecipients_include_friends\x18\x0f \x01(\bR\x18recipientsIncludeFriends\"\xb3\x03\n" +
 	"\x15PrepareUploadResponse\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x04R\x02id\x12\x16\n" +
 	"\x06method\x18\x02 \x01(\tR\x06method\x12\x17\n" +
@@ -3748,13 +3829,14 @@ const file_openpak_titlestorage_v1_titlestorage_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x13\n" +
 	"\x11ListTitlesRequest\"P\n" +
 	"\x12ListTitlesResponse\x12:\n" +
-	"\x06titles\x18\x01 \x03(\v2\".openpak.titlestorage.v1.TitleInfoR\x06titles*o\n" +
+	"\x06titles\x18\x01 \x03(\v2\".openpak.titlestorage.v1.TitleInfoR\x06titles*\x8a\x01\n" +
 	"\n" +
 	"Visibility\x12\x1a\n" +
 	"\x16VISIBILITY_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12VISIBILITY_PRIVATE\x10\x01\x12\x16\n" +
 	"\x12VISIBILITY_FRIENDS\x10\x02\x12\x15\n" +
-	"\x11VISIBILITY_PUBLIC\x10\x03*K\n" +
+	"\x11VISIBILITY_PUBLIC\x10\x03\x12\x19\n" +
+	"\x15VISIBILITY_RECIPIENTS\x10\x04*K\n" +
 	"\bTristate\x12\x18\n" +
 	"\x14TRISTATE_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rTRISTATE_TRUE\x10\x01\x12\x12\n" +
