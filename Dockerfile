@@ -14,6 +14,7 @@ RUN apk add --no-cache ca-certificates tzdata \
 WORKDIR /app
 COPY --from=build /out/app /app/app
 # Runs unprivileged: rootless podman maps this uid into the host's subuid range, and the
-# 20220 block needs no capability to bind. No local files: objects live in Postgres only.
+# 20230 block needs no capability to bind. No local files: objects live in Postgres, large
+# bodies in the S3 bucket (blob tier).
 USER 65532:65532
 ENTRYPOINT ["/app/app"]

@@ -5,11 +5,16 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"log"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/openpak/title-storage/internal/blobs"
 	"github.com/openpak/title-storage/internal/store"
 )
 
@@ -29,6 +34,10 @@ var (
 	ErrTooLarge   = errors.New("title-storage: value too large")
 	ErrForbidden  = errors.New("title-storage: the writer may not write to this owner")
 	ErrNeedNet    = errors.New("title-storage: this title is per network: the request must name its network")
+	ErrNoBlobs    = errors.New("title-storage: the blob tier is not configured")
+	ErrNoUpload   = errors.New("title-storage: no such upload (expired, replaced or already completed)")
+	ErrMismatch   = errors.New("title-storage: the uploaded body does not match the prepared upload")
+	ErrBlobs      = errors.New("title-storage: blob store unavailable")
 )
 
 var (
@@ -47,6 +56,24 @@ type Core interface {
 type Service struct {
 	Store *store.Store
 	Core  Core
+	// Blobs is the blob tier; nil turns PrepareUpload and CompleteUpload into ErrNoBlobs.
+	Blobs     *blobs.Store
+	URLTTL    time.Duration // presigned PUT/GET lifetime (default 15 minutes)
+	UploadTTL time.Duration // how long a prepared upload waits for CompleteUpload (default 1 hour)
+}
+
+func (s *Service) urlTTL() time.Duration {
+	if s.URLTTL > 0 {
+		return s.URLTTL
+	}
+	return 15 * time.Minute
+}
+
+func (s *Service) uploadTTL() time.Duration {
+	if s.UploadTTL > 0 {
+		return s.UploadTTL
+	}
+	return time.Hour
 }
 
 // Ref names a title as a caller sees it.
@@ -439,7 +466,11 @@ func (s *Service) PutObject(ctx context.Context, r Ref, p Put) (store.Object, bo
 			return p.Cond.holds(&cur.Updated, cur.Setter)
 		}
 	}
-	return s.Store.PutObject(ctx, put)
+	o, failed, err := s.Store.PutObject(ctx, put)
+	if err == nil && !failed {
+		s.drainQuiet(ctx, put.Owner)
+	}
+	return o, failed, err
 }
 
 // GetObject returns the object (with owner empty: the newest of that name under any owner, for
@@ -478,7 +509,7 @@ func (s *Service) GetObject(ctx context.Context, r Ref, viewer, owner, collectio
 	if err != nil || !ok {
 		return nil, err
 	}
-	return o, nil
+	return o, s.withURL(ctx, o)
 }
 
 // GetObjectByID is GetObject for a caller that holds the id. The id is global, so a title that
@@ -500,7 +531,7 @@ func (s *Service) GetObjectByID(ctx context.Context, network, viewer string, id 
 	if err != nil || !ok {
 		return nil, err
 	}
-	return o, nil
+	return o, s.withURL(ctx, o)
 }
 
 type ObjQuery struct {
@@ -523,8 +554,14 @@ func (s *Service) ListObjects(ctx context.Context, r Ref, q ObjQuery) ([]store.O
 	if err != nil || !found {
 		return nil, 0, err
 	}
-	return s.Store.ListObjects(ctx, store.ObjQuery{T: t, Network: r.Network, Reader: rd, Owners: owners, Collection: q.Collection, Names: q.Names,
+	os, hits, err := s.Store.ListObjects(ctx, store.ObjQuery{T: t, Network: r.Network, Reader: rd, Owners: owners, Collection: q.Collection, Names: q.Names,
 		MetaFilter: q.MetaFilter, Sort: q.Sort, Ascending: q.Ascending, Offset: max(q.Offset, 0), Limit: clamp(q.Limit), WithBody: q.Body})
+	for i := range os {
+		if err == nil {
+			err = s.withURL(ctx, &os[i])
+		}
+	}
+	return os, hits, err
 }
 
 func (s *Service) DeleteObjects(ctx context.Context, r Ref, owner, writer, collection string, names []string) (int64, error) {
@@ -538,7 +575,11 @@ func (s *Service) DeleteObjects(ctx context.Context, r Ref, owner, writer, colle
 	if err != nil || !found {
 		return 0, err
 	}
-	return s.Store.DeleteObjects(ctx, t, r.Network, strings.ToLower(owner), collection, names)
+	n, err := s.Store.DeleteObjects(ctx, t, r.Network, strings.ToLower(owner), collection, names)
+	if err == nil && n > 0 {
+		s.drainQuiet(ctx, strings.ToLower(owner))
+	}
+	return n, err
 }
 
 type Usage struct {
@@ -562,10 +603,201 @@ func (s *Service) Usage(ctx context.Context, r Ref, owner string) (Usage, error)
 	return Usage{Bytes: b, Objects: o, Variables: v, QuotaBytes: t.QuotaBytes, QuotaObjects: t.QuotaObjects, MaxObjectBytes: t.MaxObjectBytes}, err
 }
 
-// EraseAccount is the account-erasure finaliser's call; a repeat deletes nothing.
-func (s *Service) EraseAccount(ctx context.Context, account string) (int64, error) {
+// EraseAccount is the account-erasure finaliser's call: rows deleted (variables, objects, pending
+// uploads) and blobs deleted from the bucket. The blobs are deleted before it answers; when the
+// bucket fails the rows are already gone and the error asks for the repeat, which finishes the
+// blobs (the trash remembers them under the account).
+func (s *Service) EraseAccount(ctx context.Context, account string) (rows, blobCount int64, err error) {
 	if err := validAccount(account); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return s.Store.EraseAccount(ctx, strings.ToLower(account))
+	account = strings.ToLower(account)
+	if rows, err = s.Store.EraseAccount(ctx, account); err != nil {
+		return 0, 0, err
+	}
+	blobCount, err = s.Drain(ctx, account)
+	return rows, blobCount, err
+}
+
+// ---- blob tier ----
+
+// withURL adds the presigned GET to a blob-backed object.
+func (s *Service) withURL(ctx context.Context, o *store.Object) error {
+	if o == nil || o.BlobKey == "" || s.Blobs == nil {
+		return nil
+	}
+	u, err := s.Blobs.PresignGet(ctx, o.BlobKey, s.urlTTL())
+	if err != nil {
+		return errors.Join(ErrBlobs, err)
+	}
+	o.GetURL = u
+	return nil
+}
+
+// Drain deletes trashed blobs from the bucket (one owner's, or with owner "" a batch of anyone's)
+// and returns how many it deleted. A key whose delete fails stays in the trash for the janitor.
+func (s *Service) Drain(ctx context.Context, owner string) (int64, error) {
+	if s.Blobs == nil {
+		return 0, nil
+	}
+	var n int64
+	for {
+		keys, err := s.Store.Trash(ctx, owner, 500)
+		if err != nil || len(keys) == 0 {
+			return n, err
+		}
+		done := keys[:0:0]
+		var failed error
+		for _, k := range keys {
+			if err := s.Blobs.Delete(ctx, k); err != nil {
+				failed = errors.Join(ErrBlobs, err)
+				break
+			}
+			done = append(done, k)
+		}
+		if err := s.Store.Untrash(ctx, done); err != nil {
+			return n, err
+		}
+		n += int64(len(done))
+		if failed != nil {
+			return n, failed
+		}
+	}
+}
+
+// drainQuiet is Drain after a write: a failure is left to the janitor.
+func (s *Service) drainQuiet(ctx context.Context, owner string) {
+	if _, err := s.Drain(ctx, owner); err != nil {
+		log.Printf("title-storage: blob delete deferred to the janitor: %v", err)
+	}
+}
+
+type Prepare struct {
+	Owner, Writer, Setter string
+	Collection, Name      string
+	Size                  int64
+	SHA256                string
+	Info                  []byte
+	Meta                  string
+	Vis                   string
+	TTL                   time.Duration
+	PostForm              bool
+}
+
+type Prepared struct {
+	ID         int64
+	Method     string
+	URL        string
+	Headers    map[string]string
+	FormFields map[string]string
+	Expires    time.Time
+}
+
+// PrepareUpload checks the write rule, the size cap and the quota, reserves the object id and
+// returns the presigned request for the body.
+func (s *Service) PrepareUpload(ctx context.Context, r Ref, p Prepare) (Prepared, error) {
+	if s.Blobs == nil {
+		return Prepared{}, ErrNoBlobs
+	}
+	if p.Collection == "" {
+		p.Collection = "default"
+	}
+	if !collRE.MatchString(p.Collection) || len(p.Name) > MaxName || validVis(p.Vis) != nil || !store.ValidJSONObject(p.Meta) ||
+		p.Size < 0 || !blobs.ValidDigest(p.SHA256) {
+		return Prepared{}, ErrBadRequest
+	}
+	if len(p.Info) > MaxInfo || len(p.Meta) > MaxMeta {
+		return Prepared{}, ErrTooLarge
+	}
+	if err := s.authorizeWrite(ctx, p.Writer, p.Owner); err != nil {
+		return Prepared{}, err
+	}
+	t, err := s.forWrite(ctx, r)
+	if err != nil {
+		return Prepared{}, err
+	}
+	if p.Size > int64(t.MaxObjectBytes) {
+		return Prepared{}, ErrTooLarge
+	}
+	owner := strings.ToLower(p.Owner)
+	u, err := s.Store.PrepareUpload(ctx, store.Upload{T: t, Network: r.Network, Owner: owner, Setter: p.Setter, Collection: p.Collection,
+		Name: p.Name, Info: p.Info, Meta: p.Meta, Size: p.Size, SHA256: p.SHA256, Vis: p.Vis, TTL: p.TTL, Expires: store.Now().Add(s.uploadTTL())},
+		func(id int64) string { return blobKey(id) })
+	if err != nil {
+		return Prepared{}, err
+	}
+	s.drainQuiet(ctx, owner) // a replaced pending upload may have sent its bytes
+	out := Prepared{ID: u.ID, Expires: u.Expires, Method: "PUT"}
+	if p.PostForm {
+		out.Method = "POST"
+		out.URL, out.FormFields, err = s.Blobs.PresignPost(ctx, u.BlobKey, p.Size, s.urlTTL())
+	} else {
+		out.Headers = map[string]string{"Content-Type": "application/octet-stream"}
+		out.URL, err = s.Blobs.PresignPut(ctx, u.BlobKey, s.urlTTL())
+	}
+	if err != nil {
+		return Prepared{}, errors.Join(ErrBlobs, err)
+	}
+	return out, nil
+}
+
+// CompleteUpload verifies the uploaded body (size, and the digest when one was given) and makes
+// the object visible. A body that does not match is deleted and the upload stays open, so the
+// console can send it again before the upload expires.
+func (s *Service) CompleteUpload(ctx context.Context, id int64, writer string) (*store.Object, error) {
+	if s.Blobs == nil {
+		return nil, ErrNoBlobs
+	}
+	u, err := s.Store.PendingUpload(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if u == nil {
+		return nil, ErrNoUpload
+	}
+	if err := s.authorizeWrite(ctx, writer, u.Owner); err != nil {
+		return nil, err
+	}
+	size, err := s.Blobs.Size(ctx, u.BlobKey)
+	if errors.Is(err, blobs.ErrMissing) {
+		return nil, ErrMismatch
+	}
+	if err != nil {
+		return nil, errors.Join(ErrBlobs, err)
+	}
+	ok := size == u.Size
+	if ok && u.SHA256 != "" {
+		sum, err := s.Blobs.SHA256(ctx, u.BlobKey)
+		if err != nil {
+			return nil, errors.Join(ErrBlobs, err)
+		}
+		ok = sum == u.SHA256
+	}
+	if !ok {
+		if err := s.Blobs.Delete(ctx, u.BlobKey); err != nil {
+			log.Printf("title-storage: delete of a mismatched upload: %v", err)
+		}
+		return nil, ErrMismatch
+	}
+	o, found, err := s.Store.CompleteUpload(ctx, id, u.BlobKey)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, ErrNoUpload
+	}
+	s.drainQuiet(ctx, u.Owner) // the object it replaced
+	return &o, s.withURL(ctx, &o)
+}
+
+// blobKey names a body in the bucket: the object id and a random part, so a replacement never
+// overwrites the bytes a reader may still be fetching and keys cannot be guessed.
+func blobKey(id int64) string {
+	return strconv.FormatInt(id, 10) + "/" + randHex(16)
+}
+
+func randHex(n int) string {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }

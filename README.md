@@ -6,7 +6,7 @@ OpenPak's neutral per-title, per-account storage.
 | --- | --- |
 | Network | Core (all consoles) |
 | Role | Integer variables with Title User Storage semantics and named object blobs (metadata, visibility, quotas, expiry) per title and owner, for every network's storage server |
-| Depends on | [`account`](https://github.com/openpak/account) (friend list, interaction check), PostgreSQL |
+| Depends on | [`account`](https://github.com/openpak/account) (friend list, interaction check), PostgreSQL, an S3 bucket for the blob tier (optional) |
 | Used by | [`np-tus`](https://github.com/openpak/np-tus) and [`np-uploader`](https://github.com/openpak/np-uploader) (PS3); later `wfc-sake`, `nex` DataStore, `xb-stfd`, `npln` UGC |
 | Image | `ghcr.io/openpak/title-storage` |
 | Ports | 20230 HTTP, 20231 gRPC, 20232 metrics (block 20230) |
@@ -29,6 +29,10 @@ OpenPak's neutral per-title, per-account storage.
   apart inside one title.
 * **Visibility**: `private` (owner), `friends` (the owner's friends, from the account core),
   `public`. A title's default is private; adapters state the visibility their console implies.
+* **Blob tier**: large bodies go to S3 (MinIO) directly from the console with presigned requests
+  (`PrepareUpload` -> PUT or POST form -> `CompleteUpload`; reads carry a presigned `get_url`).
+  Quota and size cap are checked before the upload, size and digest after it; deletes, expiry,
+  abandoned uploads and account erasure delete the bytes. Small objects stay inline.
 * **Quota** per owner per title: bytes, objects and the largest body, with service defaults
   and per-title overrides (`UpsertTitle`).
 * **Cross-network by default**; a title with `cross_network=false` keeps each network's rows apart.
@@ -46,4 +50,6 @@ GOWORK=off go run ./cmd/title-storage
 ```
 
 Tests need PostgreSQL: `TITLE_STORAGE_TEST_DATABASE_URL=postgres://… GOWORK=off go test ./...`
-(the tests truncate the tables).
+(the tests truncate the tables). The blob tier runs against an in-process fake S3, and against a
+real one too when `TITLE_STORAGE_TEST_S3_ENDPOINT`, `_ACCESS_KEY`, `_SECRET_KEY` (`_BUCKET`, default
+`title-storage-test`) are set.

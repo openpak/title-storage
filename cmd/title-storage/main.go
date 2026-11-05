@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/openpak/title-storage/internal/api"
+	"github.com/openpak/title-storage/internal/blobs"
 	"github.com/openpak/title-storage/internal/core"
 	"github.com/openpak/title-storage/internal/grpcapi"
 	"github.com/openpak/title-storage/internal/grpclog"
@@ -40,6 +41,13 @@ func envInt(k string, def int64) int64 {
 	return def
 }
 
+func envDur(k string, def time.Duration) time.Duration {
+	if v, err := time.ParseDuration(os.Getenv(k)); err == nil && v > 0 {
+		return v
+	}
+	return def
+}
+
 func main() {
 	ctx := context.Background()
 	defaults := store.Defaults{
@@ -56,16 +64,44 @@ func main() {
 	if err != nil {
 		log.Fatalf("title-storage: %v", err)
 	}
-	svc := &service.Service{Store: st, Core: coreClient}
+	svc := &service.Service{Store: st, Core: coreClient,
+		URLTTL: envDur("TITLE_STORAGE_URL_TTL", 15*time.Minute), UploadTTL: envDur("TITLE_STORAGE_UPLOAD_TTL", time.Hour)}
 	key := os.Getenv("TITLE_STORAGE_INTERNAL_KEY")
 
-	// Expired objects (a TTL on an upload) are never served; the janitor frees the rows.
+	// The blob tier is optional: without a bucket, PrepareUpload answers FailedPrecondition and
+	// every object keeps its body inline, exactly as before.
+	if ep := os.Getenv("TITLE_STORAGE_S3_ENDPOINT"); ep != "" {
+		b, err := blobs.New(blobs.Config{Endpoint: ep, PublicURL: os.Getenv("TITLE_STORAGE_S3_PUBLIC_URL"),
+			Bucket: env("TITLE_STORAGE_S3_BUCKET", "title-storage"), Prefix: os.Getenv("TITLE_STORAGE_S3_PREFIX"),
+			AccessKey: os.Getenv("TITLE_STORAGE_S3_ACCESS_KEY"), SecretKey: os.Getenv("TITLE_STORAGE_S3_SECRET_KEY"),
+			Region: os.Getenv("TITLE_STORAGE_S3_REGION")})
+		if err != nil {
+			log.Fatalf("title-storage: blob tier: %v", err)
+		}
+		bctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if err := b.EnsureBucket(bctx); err != nil {
+			log.Printf("title-storage: blob tier: bucket: %v (uploads fail until it is reachable)", err)
+		}
+		cancel()
+		svc.Blobs = b
+		log.Printf("title-storage: blob tier on (bucket %s)", env("TITLE_STORAGE_S3_BUCKET", "title-storage"))
+	} else {
+		log.Printf("title-storage: TITLE_STORAGE_S3_ENDPOINT not set: blob tier off, bodies inline only")
+	}
+
+	// Expired objects (a TTL on an upload) are never served and uploads never completed expire;
+	// the janitor frees the rows and deletes the trashed blobs (those a write could not delete).
 	go func() {
 		for range time.Tick(10 * time.Minute) {
 			if n, err := st.Expire(ctx); err != nil {
 				log.Printf("title-storage: expire: %v", err)
 			} else if n > 0 {
-				log.Printf("title-storage: expired %d objects", n)
+				log.Printf("title-storage: expired %d objects and uploads", n)
+			}
+			if n, err := svc.Drain(ctx, ""); err != nil {
+				log.Printf("title-storage: blob trash: %v", err)
+			} else if n > 0 {
+				log.Printf("title-storage: deleted %d trashed blobs", n)
 			}
 		}
 	}()

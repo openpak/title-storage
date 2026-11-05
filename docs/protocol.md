@@ -61,6 +61,33 @@ that prints centiseconds can echo them back and match.
 | `DeleteObjects(ref, owner, writer, collection, names[])` | empty `names` = the whole collection |
 | `Usage(ref, owner)` | bytes, objects, variables and the limits that apply |
 
+## Blob tier (large bodies)
+
+A body that should not travel inline over gRPC (a video, a course with replays) goes straight from
+the console to S3 (MinIO on the box, bucket `title-storage`) with a presigned request. The object
+row stays the index; small objects keep their inline `body` exactly as before.
+
+| Call | Meaning |
+| --- | --- |
+| `PrepareUpload(ref, owner, writer, setter, collection, name, size, sha256, info, meta_json, visibility, ttl_seconds, post_form)` | the write rule, `size <= max_object_bytes` and the quota are checked now; the object `id` is reserved (the existing object's id when `name` already exists); returns `{id, method, put_url, headers, form_fields, expires_unix_ms}`. `post_form=false`: a presigned `PUT` (send `headers`); `true`: an S3 POST policy pinned to the key and the exact size (`form_fields` then the file field `file`), as NEX DataStore consoles upload |
+| `CompleteUpload(id, writer)` | checks the stored size equals `size` (and the SHA-256 when one was given), then the object appears (or replaces the one of that name) with `blob=true`, `size`, `sha256`. A mismatch or a missing body is `FailedPrecondition`; the bad body is deleted and the upload stays open, so the console can send again. An unknown, expired or completed upload is `NotFound` |
+| reads (`GetObject`, `GetObjectByID`, `ListObjects`) | a blob-backed object carries `get_url`, a presigned `GET` signed for the public host; its `body` is always empty, `include_body` or not |
+
+Rules:
+
+* A pending upload is invisible to reads and reserves its bytes and one object against the quota
+  until it completes or expires (default one hour, `TITLE_STORAGE_UPLOAD_TTL`). A second
+  `PrepareUpload` of the same object replaces the first.
+* Presigned URLs live 15 minutes (`TITLE_STORAGE_URL_TTL`) and are signed for
+  `TITLE_STORAGE_S3_PUBLIC_URL` (the host consoles connect to; S3 SigV4 binds the host).
+* Every row change that orphans bytes (delete, replacement, an inline `PutObject` over a blob
+  object, expiry, an abandoned upload, erasure) moves the key into `blob_trash` in the same
+  transaction; the caller deletes it from the bucket at once, and the ten-minute janitor retries
+  whatever failed. Blob keys are `<id>/<random>`, so a replacement never overwrites bytes a reader
+  is fetching and keys cannot be guessed.
+* No bucket configured (`TITLE_STORAGE_S3_ENDPOINT` unset): both calls are `FailedPrecondition`;
+  nothing else changes.
+
 Limits: info 4096 bytes, metadata 16 KiB (a JSON object), name 256 bytes, body up to the title's
 `max_object_bytes` (default 4 MiB). Per owner per title: `quota_bytes` (default 32 MiB) and
 `quota_objects` (default 256); a replacement counts only the difference. Both are
@@ -78,10 +105,11 @@ native ids per network.
 
 ## Errors
 
-`InvalidArgument` (bad owner, slot, op, JSON, overflow), `ResourceExhausted` (too large, quota),
-`PermissionDenied` (writer), `FailedPrecondition` (a per-network title without a network, a title
-conflict), `NotFound` (unknown neutral key), `Unavailable` (the account core did not answer; a
-friends/interaction check could not be made), `Unauthenticated`.
+`InvalidArgument` (bad owner, slot, op, JSON, digest, overflow), `ResourceExhausted` (too large,
+quota), `PermissionDenied` (writer), `FailedPrecondition` (a per-network title without a network, a
+title conflict, no blob tier, an uploaded body that does not match), `NotFound` (unknown neutral
+key, unknown or expired upload), `Unavailable` (the account core or the bucket did not answer),
+`Unauthenticated`.
 
 ## Events
 
@@ -89,12 +117,16 @@ None. Storage writes are not announced on the account core's event stream: no co
 slot or an upload as an event (the website has no storage view, and rewards count scores and
 trophies, which have their own cores). If a consumer appears, `object.put` / `object.delete` with
 `subject_id = <title>/<collection>/<name>` is where it would go. Account erasure deletes every
-variable and object the account owns (the `setter` strings other owners' rows carry for a
-writer are adapter-opaque and stay).
+variable, object and pending upload the account owns and their blobs in the bucket, and answers
+`{"deleted": rows, "blobs": n}`; when the bucket fails it answers 502 and the finaliser's repeat
+deletes the rest (the trash remembers the keys under the account). The `setter` strings other
+owners' rows carry for a writer are adapter-opaque and stay.
 
 ## Store
 
 Postgres `title_storage`: `titles` (policy), `title_keys`, `variables` (primary key
 `(title_key, ns, owner, slot)`), `objects` (unique `(title_key, ns, owner, collection, name)`, a
-global `id`, `meta jsonb`, `body bytea`). `ns` is empty on a cross-network title and the network on
+global `id`, `meta jsonb`, `body bytea`, `blob_key`/`sha256` for a blob-backed body), `uploads`
+(prepared uploads, the reserved id, `expires_at`), `blob_trash` (bucket keys still to delete).
+`ns` is empty on a cross-network title and the network on
 a per-network one. Migrated at start.

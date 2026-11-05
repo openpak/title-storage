@@ -63,7 +63,10 @@ type env struct {
 	ctx  context.Context
 }
 
-func setup(t *testing.T) *env {
+func setup(t *testing.T) *env { t.Helper(); return setupWith(t, nil) }
+
+// setupWith lets a test configure the service (the blob tier) before it serves.
+func setupWith(t *testing.T, configure func(*service.Service)) *env {
 	t.Helper()
 	tt = t
 	dbURL := os.Getenv("TITLE_STORAGE_TEST_DATABASE_URL")
@@ -75,7 +78,7 @@ func setup(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	t.Cleanup(st.Close)
-	if _, err := st.DB.Exec(context.Background(), `TRUNCATE variables, objects, title_keys, titles`); err != nil {
+	if _, err := st.DB.Exec(context.Background(), `TRUNCATE variables, objects, title_keys, titles, uploads, blob_trash`); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.MapTitle(context.Background(), "terraria", "Terraria", "np", "NPWR04270_00"); err != nil {
@@ -98,6 +101,9 @@ func setup(t *testing.T) *env {
 		return c
 	}
 	svc := &service.Service{Store: st, Core: core.New(accountv1.NewSocialClient(dial(lis)), key)}
+	if configure != nil {
+		configure(svc)
+	}
 
 	lis2 := bufconn.Listen(1 << 20)
 	gs2 := grpc.NewServer()

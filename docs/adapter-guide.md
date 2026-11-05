@@ -56,6 +56,11 @@ Reference adapters: `np-tus` (variables and slots) and `np-uploader` (attachment
   `private` and have the adapter check its own list.
 * Search by tags/owner/period: `ListObjects` with `meta_filter_json` and `owners`.
   `expires` is `ttl_seconds`.
+* Upload (`PreparePostObject` / `CompletePostObject`): `PrepareUpload(..., size, post_form=true)`;
+  the `id` is the data id, `put_url` + `form_fields` are the `DataStoreReqPostInfo` URL and form
+  fields (no request headers). `CompletePostObject(success)` is `CompleteUpload(id)`; a
+  `FailedPrecondition` there is the console's upload not matching (`DataStore::OperationNotAllowed`
+  or the title's equivalent). `GetObjectInfos`/`PrepareGetObject` answer with `get_url`.
 * Gaps: ratings (`DataStoreRatingInfo`) and custom rankings are not a core concept yet. Keep rating
   counters in `meta_json` via `PutObject` with a `Condition` until a `ratings` table exists in this
   service (planned as a sibling of `objects`, keyed by object id).

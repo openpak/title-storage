@@ -1085,6 +1085,10 @@ type Object struct {
 	CreatedUnixMs int64                  `protobuf:"varint,13,opt,name=created_unix_ms,json=createdUnixMs,proto3" json:"created_unix_ms,omitempty"`
 	UpdatedUnixMs int64                  `protobuf:"varint,14,opt,name=updated_unix_ms,json=updatedUnixMs,proto3" json:"updated_unix_ms,omitempty"`
 	ExpiresUnixMs int64                  `protobuf:"varint,15,opt,name=expires_unix_ms,json=expiresUnixMs,proto3" json:"expires_unix_ms,omitempty"` // 0 = never
+	// Blob tier: set when the body lives in S3 (body is then always empty, include_body or not).
+	GetUrl        string `protobuf:"bytes,16,opt,name=get_url,json=getUrl,proto3" json:"get_url,omitempty"` // presigned GET, short-lived; empty for an inline object
+	Blob          bool   `protobuf:"varint,17,opt,name=blob,proto3" json:"blob,omitempty"`
+	Sha256        string `protobuf:"bytes,18,opt,name=sha256,proto3" json:"sha256,omitempty"` // hex, when the uploader gave one
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1222,6 +1226,27 @@ func (x *Object) GetExpiresUnixMs() int64 {
 		return x.ExpiresUnixMs
 	}
 	return 0
+}
+
+func (x *Object) GetGetUrl() string {
+	if x != nil {
+		return x.GetUrl
+	}
+	return ""
+}
+
+func (x *Object) GetBlob() bool {
+	if x != nil {
+		return x.Blob
+	}
+	return false
+}
+
+func (x *Object) GetSha256() string {
+	if x != nil {
+		return x.Sha256
+	}
+	return ""
 }
 
 type PutObjectRequest struct {
@@ -1838,6 +1863,282 @@ func (x *DeleteObjectsRequest) GetNames() []string {
 	return nil
 }
 
+type PrepareUploadRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ref           *TitleRef              `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
+	Owner         string                 `protobuf:"bytes,2,opt,name=owner,proto3" json:"owner,omitempty"`
+	Writer        string                 `protobuf:"bytes,3,opt,name=writer,proto3" json:"writer,omitempty"`
+	Setter        string                 `protobuf:"bytes,4,opt,name=setter,proto3" json:"setter,omitempty"`
+	Collection    string                 `protobuf:"bytes,5,opt,name=collection,proto3" json:"collection,omitempty"` // default "default"
+	Name          string                 `protobuf:"bytes,6,opt,name=name,proto3" json:"name,omitempty"`             // empty: a new object named by its id
+	Size          uint64                 `protobuf:"varint,7,opt,name=size,proto3" json:"size,omitempty"`            // exact body size; at most the title's max_object_bytes, within quota
+	Sha256        string                 `protobuf:"bytes,8,opt,name=sha256,proto3" json:"sha256,omitempty"`         // optional lowercase hex; CompleteUpload checks it
+	Info          []byte                 `protobuf:"bytes,9,opt,name=info,proto3" json:"info,omitempty"`
+	MetaJson      string                 `protobuf:"bytes,10,opt,name=meta_json,json=metaJson,proto3" json:"meta_json,omitempty"`
+	Visibility    Visibility             `protobuf:"varint,11,opt,name=visibility,proto3,enum=openpak.titlestorage.v1.Visibility" json:"visibility,omitempty"`
+	TtlSeconds    uint32                 `protobuf:"varint,12,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"` // of the object once complete (0 keeps the current expiry)
+	PostForm      bool                   `protobuf:"varint,13,opt,name=post_form,json=postForm,proto3" json:"post_form,omitempty"`       // false: a PUT URL; true: a POST form (S3 POST policy, as NEX DataStore consoles send)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PrepareUploadRequest) Reset() {
+	*x = PrepareUploadRequest{}
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PrepareUploadRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PrepareUploadRequest) ProtoMessage() {}
+
+func (x *PrepareUploadRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PrepareUploadRequest.ProtoReflect.Descriptor instead.
+func (*PrepareUploadRequest) Descriptor() ([]byte, []int) {
+	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *PrepareUploadRequest) GetRef() *TitleRef {
+	if x != nil {
+		return x.Ref
+	}
+	return nil
+}
+
+func (x *PrepareUploadRequest) GetOwner() string {
+	if x != nil {
+		return x.Owner
+	}
+	return ""
+}
+
+func (x *PrepareUploadRequest) GetWriter() string {
+	if x != nil {
+		return x.Writer
+	}
+	return ""
+}
+
+func (x *PrepareUploadRequest) GetSetter() string {
+	if x != nil {
+		return x.Setter
+	}
+	return ""
+}
+
+func (x *PrepareUploadRequest) GetCollection() string {
+	if x != nil {
+		return x.Collection
+	}
+	return ""
+}
+
+func (x *PrepareUploadRequest) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *PrepareUploadRequest) GetSize() uint64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+func (x *PrepareUploadRequest) GetSha256() string {
+	if x != nil {
+		return x.Sha256
+	}
+	return ""
+}
+
+func (x *PrepareUploadRequest) GetInfo() []byte {
+	if x != nil {
+		return x.Info
+	}
+	return nil
+}
+
+func (x *PrepareUploadRequest) GetMetaJson() string {
+	if x != nil {
+		return x.MetaJson
+	}
+	return ""
+}
+
+func (x *PrepareUploadRequest) GetVisibility() Visibility {
+	if x != nil {
+		return x.Visibility
+	}
+	return Visibility_VISIBILITY_UNSPECIFIED
+}
+
+func (x *PrepareUploadRequest) GetTtlSeconds() uint32 {
+	if x != nil {
+		return x.TtlSeconds
+	}
+	return 0
+}
+
+func (x *PrepareUploadRequest) GetPostForm() bool {
+	if x != nil {
+		return x.PostForm
+	}
+	return false
+}
+
+type PrepareUploadResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            uint64                 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`                                                                                                            // the object id it will have (the existing one's when it replaces an object)
+	Method        string                 `protobuf:"bytes,2,opt,name=method,proto3" json:"method,omitempty"`                                                                                                     // "PUT" or "POST"
+	PutUrl        string                 `protobuf:"bytes,3,opt,name=put_url,json=putUrl,proto3" json:"put_url,omitempty"`                                                                                       // where to send the body
+	Headers       map[string]string      `protobuf:"bytes,4,rep,name=headers,proto3" json:"headers,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`                         // to send with the PUT
+	FormFields    map[string]string      `protobuf:"bytes,5,rep,name=form_fields,json=formFields,proto3" json:"form_fields,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // POST only: the fields to send before the file field ("file")
+	ExpiresUnixMs int64                  `protobuf:"varint,6,opt,name=expires_unix_ms,json=expiresUnixMs,proto3" json:"expires_unix_ms,omitempty"`                                                               // the upload must be completed before this
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PrepareUploadResponse) Reset() {
+	*x = PrepareUploadResponse{}
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PrepareUploadResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PrepareUploadResponse) ProtoMessage() {}
+
+func (x *PrepareUploadResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PrepareUploadResponse.ProtoReflect.Descriptor instead.
+func (*PrepareUploadResponse) Descriptor() ([]byte, []int) {
+	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *PrepareUploadResponse) GetId() uint64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *PrepareUploadResponse) GetMethod() string {
+	if x != nil {
+		return x.Method
+	}
+	return ""
+}
+
+func (x *PrepareUploadResponse) GetPutUrl() string {
+	if x != nil {
+		return x.PutUrl
+	}
+	return ""
+}
+
+func (x *PrepareUploadResponse) GetHeaders() map[string]string {
+	if x != nil {
+		return x.Headers
+	}
+	return nil
+}
+
+func (x *PrepareUploadResponse) GetFormFields() map[string]string {
+	if x != nil {
+		return x.FormFields
+	}
+	return nil
+}
+
+func (x *PrepareUploadResponse) GetExpiresUnixMs() int64 {
+	if x != nil {
+		return x.ExpiresUnixMs
+	}
+	return 0
+}
+
+type CompleteUploadRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            uint64                 `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	Writer        string                 `protobuf:"bytes,2,opt,name=writer,proto3" json:"writer,omitempty"` // the same rule as any write to the owner
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CompleteUploadRequest) Reset() {
+	*x = CompleteUploadRequest{}
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CompleteUploadRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CompleteUploadRequest) ProtoMessage() {}
+
+func (x *CompleteUploadRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CompleteUploadRequest.ProtoReflect.Descriptor instead.
+func (*CompleteUploadRequest) Descriptor() ([]byte, []int) {
+	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *CompleteUploadRequest) GetId() uint64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *CompleteUploadRequest) GetWriter() string {
+	if x != nil {
+		return x.Writer
+	}
+	return ""
+}
+
 type UsageRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Ref           *TitleRef              `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
@@ -1848,7 +2149,7 @@ type UsageRequest struct {
 
 func (x *UsageRequest) Reset() {
 	*x = UsageRequest{}
-	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[21]
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1860,7 +2161,7 @@ func (x *UsageRequest) String() string {
 func (*UsageRequest) ProtoMessage() {}
 
 func (x *UsageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[21]
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1873,7 +2174,7 @@ func (x *UsageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UsageRequest.ProtoReflect.Descriptor instead.
 func (*UsageRequest) Descriptor() ([]byte, []int) {
-	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{21}
+	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *UsageRequest) GetRef() *TitleRef {
@@ -1904,7 +2205,7 @@ type UsageResponse struct {
 
 func (x *UsageResponse) Reset() {
 	*x = UsageResponse{}
-	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[22]
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1916,7 +2217,7 @@ func (x *UsageResponse) String() string {
 func (*UsageResponse) ProtoMessage() {}
 
 func (x *UsageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[22]
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1929,7 +2230,7 @@ func (x *UsageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UsageResponse.ProtoReflect.Descriptor instead.
 func (*UsageResponse) Descriptor() ([]byte, []int) {
-	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{22}
+	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *UsageResponse) GetBytes() uint64 {
@@ -1986,7 +2287,7 @@ type MapTitleRequest struct {
 
 func (x *MapTitleRequest) Reset() {
 	*x = MapTitleRequest{}
-	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[23]
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1998,7 +2299,7 @@ func (x *MapTitleRequest) String() string {
 func (*MapTitleRequest) ProtoMessage() {}
 
 func (x *MapTitleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[23]
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2011,7 +2312,7 @@ func (x *MapTitleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MapTitleRequest.ProtoReflect.Descriptor instead.
 func (*MapTitleRequest) Descriptor() ([]byte, []int) {
-	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{23}
+	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *MapTitleRequest) GetTitle() string {
@@ -2050,7 +2351,7 @@ type MapTitleResponse struct {
 
 func (x *MapTitleResponse) Reset() {
 	*x = MapTitleResponse{}
-	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[24]
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2062,7 +2363,7 @@ func (x *MapTitleResponse) String() string {
 func (*MapTitleResponse) ProtoMessage() {}
 
 func (x *MapTitleResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[24]
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2075,7 +2376,7 @@ func (x *MapTitleResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MapTitleResponse.ProtoReflect.Descriptor instead.
 func (*MapTitleResponse) Descriptor() ([]byte, []int) {
-	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{24}
+	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{27}
 }
 
 type UpsertTitleRequest struct {
@@ -2093,7 +2394,7 @@ type UpsertTitleRequest struct {
 
 func (x *UpsertTitleRequest) Reset() {
 	*x = UpsertTitleRequest{}
-	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[25]
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2105,7 +2406,7 @@ func (x *UpsertTitleRequest) String() string {
 func (*UpsertTitleRequest) ProtoMessage() {}
 
 func (x *UpsertTitleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[25]
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2118,7 +2419,7 @@ func (x *UpsertTitleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UpsertTitleRequest.ProtoReflect.Descriptor instead.
 func (*UpsertTitleRequest) Descriptor() ([]byte, []int) {
-	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{25}
+	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *UpsertTitleRequest) GetTitle() string {
@@ -2186,7 +2487,7 @@ type TitleInfo struct {
 
 func (x *TitleInfo) Reset() {
 	*x = TitleInfo{}
-	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[26]
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2198,7 +2499,7 @@ func (x *TitleInfo) String() string {
 func (*TitleInfo) ProtoMessage() {}
 
 func (x *TitleInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[26]
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2211,7 +2512,7 @@ func (x *TitleInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TitleInfo.ProtoReflect.Descriptor instead.
 func (*TitleInfo) Descriptor() ([]byte, []int) {
-	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{26}
+	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *TitleInfo) GetTitle() string {
@@ -2278,7 +2579,7 @@ type ListTitlesRequest struct {
 
 func (x *ListTitlesRequest) Reset() {
 	*x = ListTitlesRequest{}
-	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[27]
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2290,7 +2591,7 @@ func (x *ListTitlesRequest) String() string {
 func (*ListTitlesRequest) ProtoMessage() {}
 
 func (x *ListTitlesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[27]
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2303,7 +2604,7 @@ func (x *ListTitlesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTitlesRequest.ProtoReflect.Descriptor instead.
 func (*ListTitlesRequest) Descriptor() ([]byte, []int) {
-	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{27}
+	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{30}
 }
 
 type ListTitlesResponse struct {
@@ -2315,7 +2616,7 @@ type ListTitlesResponse struct {
 
 func (x *ListTitlesResponse) Reset() {
 	*x = ListTitlesResponse{}
-	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[28]
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2327,7 +2628,7 @@ func (x *ListTitlesResponse) String() string {
 func (*ListTitlesResponse) ProtoMessage() {}
 
 func (x *ListTitlesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[28]
+	mi := &file_openpak_titlestorage_v1_titlestorage_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2340,7 +2641,7 @@ func (x *ListTitlesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTitlesResponse.ProtoReflect.Descriptor instead.
 func (*ListTitlesResponse) Descriptor() ([]byte, []int) {
-	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{28}
+	return file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *ListTitlesResponse) GetTitles() []*TitleInfo {
@@ -2438,7 +2739,7 @@ const file_openpak_titlestorage_v1_titlestorage_proto_rawDesc = "" +
 	"\x06writer\x18\x03 \x01(\tR\x06writer\x12\x14\n" +
 	"\x05slots\x18\x04 \x03(\x05R\x05slots\"*\n" +
 	"\x0eDeleteResponse\x12\x18\n" +
-	"\adeleted\x18\x01 \x01(\rR\adeleted\"\xc0\x03\n" +
+	"\adeleted\x18\x01 \x01(\rR\adeleted\"\x85\x04\n" +
 	"\x06Object\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x04R\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12\x14\n" +
@@ -2459,7 +2760,10 @@ const file_openpak_titlestorage_v1_titlestorage_proto_rawDesc = "" +
 	"\anetwork\x18\f \x01(\tR\anetwork\x12&\n" +
 	"\x0fcreated_unix_ms\x18\r \x01(\x03R\rcreatedUnixMs\x12&\n" +
 	"\x0fupdated_unix_ms\x18\x0e \x01(\x03R\rupdatedUnixMs\x12&\n" +
-	"\x0fexpires_unix_ms\x18\x0f \x01(\x03R\rexpiresUnixMs\"\xae\x03\n" +
+	"\x0fexpires_unix_ms\x18\x0f \x01(\x03R\rexpiresUnixMs\x12\x17\n" +
+	"\aget_url\x18\x10 \x01(\tR\x06getUrl\x12\x12\n" +
+	"\x04blob\x18\x11 \x01(\bR\x04blob\x12\x16\n" +
+	"\x06sha256\x18\x12 \x01(\tR\x06sha256\"\xae\x03\n" +
 	"\x10PutObjectRequest\x123\n" +
 	"\x03ref\x18\x01 \x01(\v2!.openpak.titlestorage.v1.TitleRefR\x03ref\x12\x14\n" +
 	"\x05owner\x18\x02 \x01(\tR\x05owner\x12\x16\n" +
@@ -2524,7 +2828,44 @@ const file_openpak_titlestorage_v1_titlestorage_proto_rawDesc = "" +
 	"\n" +
 	"collection\x18\x04 \x01(\tR\n" +
 	"collection\x12\x14\n" +
-	"\x05names\x18\x05 \x03(\tR\x05names\"Y\n" +
+	"\x05names\x18\x05 \x03(\tR\x05names\"\xa5\x03\n" +
+	"\x14PrepareUploadRequest\x123\n" +
+	"\x03ref\x18\x01 \x01(\v2!.openpak.titlestorage.v1.TitleRefR\x03ref\x12\x14\n" +
+	"\x05owner\x18\x02 \x01(\tR\x05owner\x12\x16\n" +
+	"\x06writer\x18\x03 \x01(\tR\x06writer\x12\x16\n" +
+	"\x06setter\x18\x04 \x01(\tR\x06setter\x12\x1e\n" +
+	"\n" +
+	"collection\x18\x05 \x01(\tR\n" +
+	"collection\x12\x12\n" +
+	"\x04name\x18\x06 \x01(\tR\x04name\x12\x12\n" +
+	"\x04size\x18\a \x01(\x04R\x04size\x12\x16\n" +
+	"\x06sha256\x18\b \x01(\tR\x06sha256\x12\x12\n" +
+	"\x04info\x18\t \x01(\fR\x04info\x12\x1b\n" +
+	"\tmeta_json\x18\n" +
+	" \x01(\tR\bmetaJson\x12C\n" +
+	"\n" +
+	"visibility\x18\v \x01(\x0e2#.openpak.titlestorage.v1.VisibilityR\n" +
+	"visibility\x12\x1f\n" +
+	"\vttl_seconds\x18\f \x01(\rR\n" +
+	"ttlSeconds\x12\x1b\n" +
+	"\tpost_form\x18\r \x01(\bR\bpostForm\"\xb3\x03\n" +
+	"\x15PrepareUploadResponse\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x04R\x02id\x12\x16\n" +
+	"\x06method\x18\x02 \x01(\tR\x06method\x12\x17\n" +
+	"\aput_url\x18\x03 \x01(\tR\x06putUrl\x12U\n" +
+	"\aheaders\x18\x04 \x03(\v2;.openpak.titlestorage.v1.PrepareUploadResponse.HeadersEntryR\aheaders\x12_\n" +
+	"\vform_fields\x18\x05 \x03(\v2>.openpak.titlestorage.v1.PrepareUploadResponse.FormFieldsEntryR\n" +
+	"formFields\x12&\n" +
+	"\x0fexpires_unix_ms\x18\x06 \x01(\x03R\rexpiresUnixMs\x1a:\n" +
+	"\fHeadersEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a=\n" +
+	"\x0fFormFieldsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"?\n" +
+	"\x15CompleteUploadRequest\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x04R\x02id\x12\x16\n" +
+	"\x06writer\x18\x02 \x01(\tR\x06writer\"Y\n" +
 	"\fUsageRequest\x123\n" +
 	"\x03ref\x18\x01 \x01(\v2!.openpak.titlestorage.v1.TitleRefR\x03ref\x12\x14\n" +
 	"\x05owner\x18\x02 \x01(\tR\x05owner\"\xcd\x01\n" +
@@ -2577,7 +2918,7 @@ const file_openpak_titlestorage_v1_titlestorage_proto_rawDesc = "" +
 	"\bTristate\x12\x18\n" +
 	"\x14TRISTATE_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rTRISTATE_TRUE\x10\x01\x12\x12\n" +
-	"\x0eTRISTATE_FALSE\x10\x022\xa6\v\n" +
+	"\x0eTRISTATE_FALSE\x10\x022\x81\r\n" +
 	"\fTitleStorage\x12k\n" +
 	"\fSetVariables\x12,.openpak.titlestorage.v1.SetVariablesRequest\x1a-.openpak.titlestorage.v1.SetVariablesResponse\x12n\n" +
 	"\rListVariables\x12-.openpak.titlestorage.v1.ListVariablesRequest\x1a..openpak.titlestorage.v1.ListVariablesResponse\x12c\n" +
@@ -2588,7 +2929,9 @@ const file_openpak_titlestorage_v1_titlestorage_proto_rawDesc = "" +
 	"\tGetObject\x12).openpak.titlestorage.v1.GetObjectRequest\x1a'.openpak.titlestorage.v1.ObjectResponse\x12g\n" +
 	"\rGetObjectByID\x12-.openpak.titlestorage.v1.GetObjectByIDRequest\x1a'.openpak.titlestorage.v1.ObjectResponse\x12h\n" +
 	"\vListObjects\x12+.openpak.titlestorage.v1.ListObjectsRequest\x1a,.openpak.titlestorage.v1.ListObjectsResponse\x12g\n" +
-	"\rDeleteObjects\x12-.openpak.titlestorage.v1.DeleteObjectsRequest\x1a'.openpak.titlestorage.v1.DeleteResponse\x12V\n" +
+	"\rDeleteObjects\x12-.openpak.titlestorage.v1.DeleteObjectsRequest\x1a'.openpak.titlestorage.v1.DeleteResponse\x12n\n" +
+	"\rPrepareUpload\x12-.openpak.titlestorage.v1.PrepareUploadRequest\x1a..openpak.titlestorage.v1.PrepareUploadResponse\x12i\n" +
+	"\x0eCompleteUpload\x12..openpak.titlestorage.v1.CompleteUploadRequest\x1a'.openpak.titlestorage.v1.ObjectResponse\x12V\n" +
 	"\x05Usage\x12%.openpak.titlestorage.v1.UsageRequest\x1a&.openpak.titlestorage.v1.UsageResponse\x12_\n" +
 	"\bMapTitle\x12(.openpak.titlestorage.v1.MapTitleRequest\x1a).openpak.titlestorage.v1.MapTitleResponse\x12^\n" +
 	"\vUpsertTitle\x12+.openpak.titlestorage.v1.UpsertTitleRequest\x1a\".openpak.titlestorage.v1.TitleInfo\x12e\n" +
@@ -2608,7 +2951,7 @@ func file_openpak_titlestorage_v1_titlestorage_proto_rawDescGZIP() []byte {
 }
 
 var file_openpak_titlestorage_v1_titlestorage_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_openpak_titlestorage_v1_titlestorage_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
+var file_openpak_titlestorage_v1_titlestorage_proto_msgTypes = make([]protoimpl.MessageInfo, 35)
 var file_openpak_titlestorage_v1_titlestorage_proto_goTypes = []any{
 	(Visibility)(0),                // 0: openpak.titlestorage.v1.Visibility
 	(Tristate)(0),                  // 1: openpak.titlestorage.v1.Tristate
@@ -2633,15 +2976,20 @@ var file_openpak_titlestorage_v1_titlestorage_proto_goTypes = []any{
 	(*ListObjectsRequest)(nil),     // 20: openpak.titlestorage.v1.ListObjectsRequest
 	(*ListObjectsResponse)(nil),    // 21: openpak.titlestorage.v1.ListObjectsResponse
 	(*DeleteObjectsRequest)(nil),   // 22: openpak.titlestorage.v1.DeleteObjectsRequest
-	(*UsageRequest)(nil),           // 23: openpak.titlestorage.v1.UsageRequest
-	(*UsageResponse)(nil),          // 24: openpak.titlestorage.v1.UsageResponse
-	(*MapTitleRequest)(nil),        // 25: openpak.titlestorage.v1.MapTitleRequest
-	(*MapTitleResponse)(nil),       // 26: openpak.titlestorage.v1.MapTitleResponse
-	(*UpsertTitleRequest)(nil),     // 27: openpak.titlestorage.v1.UpsertTitleRequest
-	(*TitleInfo)(nil),              // 28: openpak.titlestorage.v1.TitleInfo
-	(*ListTitlesRequest)(nil),      // 29: openpak.titlestorage.v1.ListTitlesRequest
-	(*ListTitlesResponse)(nil),     // 30: openpak.titlestorage.v1.ListTitlesResponse
-	nil,                            // 31: openpak.titlestorage.v1.TitleInfo.NativeIdsEntry
+	(*PrepareUploadRequest)(nil),   // 23: openpak.titlestorage.v1.PrepareUploadRequest
+	(*PrepareUploadResponse)(nil),  // 24: openpak.titlestorage.v1.PrepareUploadResponse
+	(*CompleteUploadRequest)(nil),  // 25: openpak.titlestorage.v1.CompleteUploadRequest
+	(*UsageRequest)(nil),           // 26: openpak.titlestorage.v1.UsageRequest
+	(*UsageResponse)(nil),          // 27: openpak.titlestorage.v1.UsageResponse
+	(*MapTitleRequest)(nil),        // 28: openpak.titlestorage.v1.MapTitleRequest
+	(*MapTitleResponse)(nil),       // 29: openpak.titlestorage.v1.MapTitleResponse
+	(*UpsertTitleRequest)(nil),     // 30: openpak.titlestorage.v1.UpsertTitleRequest
+	(*TitleInfo)(nil),              // 31: openpak.titlestorage.v1.TitleInfo
+	(*ListTitlesRequest)(nil),      // 32: openpak.titlestorage.v1.ListTitlesRequest
+	(*ListTitlesResponse)(nil),     // 33: openpak.titlestorage.v1.ListTitlesResponse
+	nil,                            // 34: openpak.titlestorage.v1.PrepareUploadResponse.HeadersEntry
+	nil,                            // 35: openpak.titlestorage.v1.PrepareUploadResponse.FormFieldsEntry
+	nil,                            // 36: openpak.titlestorage.v1.TitleInfo.NativeIdsEntry
 }
 var file_openpak_titlestorage_v1_titlestorage_proto_depIdxs = []int32{
 	0,  // 0: openpak.titlestorage.v1.Variable.visibility:type_name -> openpak.titlestorage.v1.Visibility
@@ -2667,45 +3015,53 @@ var file_openpak_titlestorage_v1_titlestorage_proto_depIdxs = []int32{
 	2,  // 20: openpak.titlestorage.v1.ListObjectsRequest.ref:type_name -> openpak.titlestorage.v1.TitleRef
 	15, // 21: openpak.titlestorage.v1.ListObjectsResponse.objects:type_name -> openpak.titlestorage.v1.Object
 	2,  // 22: openpak.titlestorage.v1.DeleteObjectsRequest.ref:type_name -> openpak.titlestorage.v1.TitleRef
-	2,  // 23: openpak.titlestorage.v1.UsageRequest.ref:type_name -> openpak.titlestorage.v1.TitleRef
-	1,  // 24: openpak.titlestorage.v1.UpsertTitleRequest.cross_network:type_name -> openpak.titlestorage.v1.Tristate
-	0,  // 25: openpak.titlestorage.v1.UpsertTitleRequest.default_visibility:type_name -> openpak.titlestorage.v1.Visibility
-	0,  // 26: openpak.titlestorage.v1.TitleInfo.default_visibility:type_name -> openpak.titlestorage.v1.Visibility
-	31, // 27: openpak.titlestorage.v1.TitleInfo.native_ids:type_name -> openpak.titlestorage.v1.TitleInfo.NativeIdsEntry
-	28, // 28: openpak.titlestorage.v1.ListTitlesResponse.titles:type_name -> openpak.titlestorage.v1.TitleInfo
-	6,  // 29: openpak.titlestorage.v1.TitleStorage.SetVariables:input_type -> openpak.titlestorage.v1.SetVariablesRequest
-	8,  // 30: openpak.titlestorage.v1.TitleStorage.ListVariables:input_type -> openpak.titlestorage.v1.ListVariablesRequest
-	10, // 31: openpak.titlestorage.v1.TitleStorage.AddVariable:input_type -> openpak.titlestorage.v1.AddVariableRequest
-	11, // 32: openpak.titlestorage.v1.TitleStorage.TrySetVariable:input_type -> openpak.titlestorage.v1.TrySetVariableRequest
-	13, // 33: openpak.titlestorage.v1.TitleStorage.DeleteVariables:input_type -> openpak.titlestorage.v1.DeleteVariablesRequest
-	16, // 34: openpak.titlestorage.v1.TitleStorage.PutObject:input_type -> openpak.titlestorage.v1.PutObjectRequest
-	17, // 35: openpak.titlestorage.v1.TitleStorage.GetObject:input_type -> openpak.titlestorage.v1.GetObjectRequest
-	18, // 36: openpak.titlestorage.v1.TitleStorage.GetObjectByID:input_type -> openpak.titlestorage.v1.GetObjectByIDRequest
-	20, // 37: openpak.titlestorage.v1.TitleStorage.ListObjects:input_type -> openpak.titlestorage.v1.ListObjectsRequest
-	22, // 38: openpak.titlestorage.v1.TitleStorage.DeleteObjects:input_type -> openpak.titlestorage.v1.DeleteObjectsRequest
-	23, // 39: openpak.titlestorage.v1.TitleStorage.Usage:input_type -> openpak.titlestorage.v1.UsageRequest
-	25, // 40: openpak.titlestorage.v1.TitleStorage.MapTitle:input_type -> openpak.titlestorage.v1.MapTitleRequest
-	27, // 41: openpak.titlestorage.v1.TitleStorage.UpsertTitle:input_type -> openpak.titlestorage.v1.UpsertTitleRequest
-	29, // 42: openpak.titlestorage.v1.TitleStorage.ListTitles:input_type -> openpak.titlestorage.v1.ListTitlesRequest
-	7,  // 43: openpak.titlestorage.v1.TitleStorage.SetVariables:output_type -> openpak.titlestorage.v1.SetVariablesResponse
-	9,  // 44: openpak.titlestorage.v1.TitleStorage.ListVariables:output_type -> openpak.titlestorage.v1.ListVariablesResponse
-	12, // 45: openpak.titlestorage.v1.TitleStorage.AddVariable:output_type -> openpak.titlestorage.v1.VariableResult
-	12, // 46: openpak.titlestorage.v1.TitleStorage.TrySetVariable:output_type -> openpak.titlestorage.v1.VariableResult
-	14, // 47: openpak.titlestorage.v1.TitleStorage.DeleteVariables:output_type -> openpak.titlestorage.v1.DeleteResponse
-	19, // 48: openpak.titlestorage.v1.TitleStorage.PutObject:output_type -> openpak.titlestorage.v1.ObjectResponse
-	19, // 49: openpak.titlestorage.v1.TitleStorage.GetObject:output_type -> openpak.titlestorage.v1.ObjectResponse
-	19, // 50: openpak.titlestorage.v1.TitleStorage.GetObjectByID:output_type -> openpak.titlestorage.v1.ObjectResponse
-	21, // 51: openpak.titlestorage.v1.TitleStorage.ListObjects:output_type -> openpak.titlestorage.v1.ListObjectsResponse
-	14, // 52: openpak.titlestorage.v1.TitleStorage.DeleteObjects:output_type -> openpak.titlestorage.v1.DeleteResponse
-	24, // 53: openpak.titlestorage.v1.TitleStorage.Usage:output_type -> openpak.titlestorage.v1.UsageResponse
-	26, // 54: openpak.titlestorage.v1.TitleStorage.MapTitle:output_type -> openpak.titlestorage.v1.MapTitleResponse
-	28, // 55: openpak.titlestorage.v1.TitleStorage.UpsertTitle:output_type -> openpak.titlestorage.v1.TitleInfo
-	30, // 56: openpak.titlestorage.v1.TitleStorage.ListTitles:output_type -> openpak.titlestorage.v1.ListTitlesResponse
-	43, // [43:57] is the sub-list for method output_type
-	29, // [29:43] is the sub-list for method input_type
-	29, // [29:29] is the sub-list for extension type_name
-	29, // [29:29] is the sub-list for extension extendee
-	0,  // [0:29] is the sub-list for field type_name
+	2,  // 23: openpak.titlestorage.v1.PrepareUploadRequest.ref:type_name -> openpak.titlestorage.v1.TitleRef
+	0,  // 24: openpak.titlestorage.v1.PrepareUploadRequest.visibility:type_name -> openpak.titlestorage.v1.Visibility
+	34, // 25: openpak.titlestorage.v1.PrepareUploadResponse.headers:type_name -> openpak.titlestorage.v1.PrepareUploadResponse.HeadersEntry
+	35, // 26: openpak.titlestorage.v1.PrepareUploadResponse.form_fields:type_name -> openpak.titlestorage.v1.PrepareUploadResponse.FormFieldsEntry
+	2,  // 27: openpak.titlestorage.v1.UsageRequest.ref:type_name -> openpak.titlestorage.v1.TitleRef
+	1,  // 28: openpak.titlestorage.v1.UpsertTitleRequest.cross_network:type_name -> openpak.titlestorage.v1.Tristate
+	0,  // 29: openpak.titlestorage.v1.UpsertTitleRequest.default_visibility:type_name -> openpak.titlestorage.v1.Visibility
+	0,  // 30: openpak.titlestorage.v1.TitleInfo.default_visibility:type_name -> openpak.titlestorage.v1.Visibility
+	36, // 31: openpak.titlestorage.v1.TitleInfo.native_ids:type_name -> openpak.titlestorage.v1.TitleInfo.NativeIdsEntry
+	31, // 32: openpak.titlestorage.v1.ListTitlesResponse.titles:type_name -> openpak.titlestorage.v1.TitleInfo
+	6,  // 33: openpak.titlestorage.v1.TitleStorage.SetVariables:input_type -> openpak.titlestorage.v1.SetVariablesRequest
+	8,  // 34: openpak.titlestorage.v1.TitleStorage.ListVariables:input_type -> openpak.titlestorage.v1.ListVariablesRequest
+	10, // 35: openpak.titlestorage.v1.TitleStorage.AddVariable:input_type -> openpak.titlestorage.v1.AddVariableRequest
+	11, // 36: openpak.titlestorage.v1.TitleStorage.TrySetVariable:input_type -> openpak.titlestorage.v1.TrySetVariableRequest
+	13, // 37: openpak.titlestorage.v1.TitleStorage.DeleteVariables:input_type -> openpak.titlestorage.v1.DeleteVariablesRequest
+	16, // 38: openpak.titlestorage.v1.TitleStorage.PutObject:input_type -> openpak.titlestorage.v1.PutObjectRequest
+	17, // 39: openpak.titlestorage.v1.TitleStorage.GetObject:input_type -> openpak.titlestorage.v1.GetObjectRequest
+	18, // 40: openpak.titlestorage.v1.TitleStorage.GetObjectByID:input_type -> openpak.titlestorage.v1.GetObjectByIDRequest
+	20, // 41: openpak.titlestorage.v1.TitleStorage.ListObjects:input_type -> openpak.titlestorage.v1.ListObjectsRequest
+	22, // 42: openpak.titlestorage.v1.TitleStorage.DeleteObjects:input_type -> openpak.titlestorage.v1.DeleteObjectsRequest
+	23, // 43: openpak.titlestorage.v1.TitleStorage.PrepareUpload:input_type -> openpak.titlestorage.v1.PrepareUploadRequest
+	25, // 44: openpak.titlestorage.v1.TitleStorage.CompleteUpload:input_type -> openpak.titlestorage.v1.CompleteUploadRequest
+	26, // 45: openpak.titlestorage.v1.TitleStorage.Usage:input_type -> openpak.titlestorage.v1.UsageRequest
+	28, // 46: openpak.titlestorage.v1.TitleStorage.MapTitle:input_type -> openpak.titlestorage.v1.MapTitleRequest
+	30, // 47: openpak.titlestorage.v1.TitleStorage.UpsertTitle:input_type -> openpak.titlestorage.v1.UpsertTitleRequest
+	32, // 48: openpak.titlestorage.v1.TitleStorage.ListTitles:input_type -> openpak.titlestorage.v1.ListTitlesRequest
+	7,  // 49: openpak.titlestorage.v1.TitleStorage.SetVariables:output_type -> openpak.titlestorage.v1.SetVariablesResponse
+	9,  // 50: openpak.titlestorage.v1.TitleStorage.ListVariables:output_type -> openpak.titlestorage.v1.ListVariablesResponse
+	12, // 51: openpak.titlestorage.v1.TitleStorage.AddVariable:output_type -> openpak.titlestorage.v1.VariableResult
+	12, // 52: openpak.titlestorage.v1.TitleStorage.TrySetVariable:output_type -> openpak.titlestorage.v1.VariableResult
+	14, // 53: openpak.titlestorage.v1.TitleStorage.DeleteVariables:output_type -> openpak.titlestorage.v1.DeleteResponse
+	19, // 54: openpak.titlestorage.v1.TitleStorage.PutObject:output_type -> openpak.titlestorage.v1.ObjectResponse
+	19, // 55: openpak.titlestorage.v1.TitleStorage.GetObject:output_type -> openpak.titlestorage.v1.ObjectResponse
+	19, // 56: openpak.titlestorage.v1.TitleStorage.GetObjectByID:output_type -> openpak.titlestorage.v1.ObjectResponse
+	21, // 57: openpak.titlestorage.v1.TitleStorage.ListObjects:output_type -> openpak.titlestorage.v1.ListObjectsResponse
+	14, // 58: openpak.titlestorage.v1.TitleStorage.DeleteObjects:output_type -> openpak.titlestorage.v1.DeleteResponse
+	24, // 59: openpak.titlestorage.v1.TitleStorage.PrepareUpload:output_type -> openpak.titlestorage.v1.PrepareUploadResponse
+	19, // 60: openpak.titlestorage.v1.TitleStorage.CompleteUpload:output_type -> openpak.titlestorage.v1.ObjectResponse
+	27, // 61: openpak.titlestorage.v1.TitleStorage.Usage:output_type -> openpak.titlestorage.v1.UsageResponse
+	29, // 62: openpak.titlestorage.v1.TitleStorage.MapTitle:output_type -> openpak.titlestorage.v1.MapTitleResponse
+	31, // 63: openpak.titlestorage.v1.TitleStorage.UpsertTitle:output_type -> openpak.titlestorage.v1.TitleInfo
+	33, // 64: openpak.titlestorage.v1.TitleStorage.ListTitles:output_type -> openpak.titlestorage.v1.ListTitlesResponse
+	49, // [49:65] is the sub-list for method output_type
+	33, // [33:49] is the sub-list for method input_type
+	33, // [33:33] is the sub-list for extension type_name
+	33, // [33:33] is the sub-list for extension extendee
+	0,  // [0:33] is the sub-list for field type_name
 }
 
 func init() { file_openpak_titlestorage_v1_titlestorage_proto_init() }
@@ -2720,7 +3076,7 @@ func file_openpak_titlestorage_v1_titlestorage_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_openpak_titlestorage_v1_titlestorage_proto_rawDesc), len(file_openpak_titlestorage_v1_titlestorage_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   30,
+			NumMessages:   35,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

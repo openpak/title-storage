@@ -4,6 +4,9 @@
 Description=OpenPak title storage (neutral per-title variables and objects)
 Requires=openpak-postgres.service openpak-account.service
 After=openpak-postgres.service openpak-account.service
+# The blob tier degrades (uploads fail, reads still served) without MinIO: Wants, not Requires.
+Wants=openpak-minio.service
+After=openpak-minio.service
 [Container]
 ContainerName=openpak-title-storage
 Image=ghcr.io/openpak/title-storage:latest
@@ -12,6 +15,8 @@ Network=openpak.network
 PublishPort=127.0.0.1:20230:20230
 EnvironmentFile=%h/openpak/deploy/.env
 Environment=TITLE_STORAGE_HTTP_ADDR=:20230 TITLE_STORAGE_GRPC_ADDR=:20231 TITLE_STORAGE_METRICS_ADDR=:20232
+# Blob tier: TITLE_STORAGE_S3_ACCESS_KEY / _SECRET_KEY come from the shared .env.
+Environment=TITLE_STORAGE_S3_ENDPOINT=http://openpak-minio:9000 TITLE_STORAGE_S3_PUBLIC_URL=http://title-storage.openpak.org TITLE_STORAGE_S3_BUCKET=title-storage
 [Service]
 Restart=always
 [Install]

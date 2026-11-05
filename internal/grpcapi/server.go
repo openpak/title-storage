@@ -95,7 +95,7 @@ func pbVarResult(r service.VarResult) *pb.VariableResult {
 func pbObj(o store.Object) *pb.Object {
 	out := &pb.Object{Id: uint64(o.ID), Title: o.Title, Owner: o.Owner, Collection: o.Collection, Name: o.Name, Info: o.Info, MetaJson: o.Meta,
 		Body: o.Body, Size: uint64(o.Size), Setter: o.Setter, Visibility: visOut(o.Visibility), Network: o.Network,
-		CreatedUnixMs: o.Created.UnixMilli(), UpdatedUnixMs: o.Updated.UnixMilli()}
+		CreatedUnixMs: o.Created.UnixMilli(), UpdatedUnixMs: o.Updated.UnixMilli(), GetUrl: o.GetURL, Blob: o.BlobKey != "", Sha256: o.SHA256}
 	if o.Expires != nil {
 		out.ExpiresUnixMs = o.Expires.UnixMilli()
 	}
@@ -243,6 +243,34 @@ func (s *Server) DeleteObjects(ctx context.Context, req *pb.DeleteObjectsRequest
 	return &pb.DeleteResponse{Deleted: uint32(n)}, nil
 }
 
+func (s *Server) PrepareUpload(ctx context.Context, req *pb.PrepareUploadRequest) (*pb.PrepareUploadResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	if req.GetSize() > 1<<40 {
+		return nil, mapErr(service.ErrTooLarge)
+	}
+	p, err := s.svc.PrepareUpload(ctx, ref(req.GetRef()), service.Prepare{Owner: req.GetOwner(), Writer: req.GetWriter(), Setter: req.GetSetter(),
+		Collection: req.GetCollection(), Name: req.GetName(), Size: int64(req.GetSize()), SHA256: req.GetSha256(), Info: req.GetInfo(),
+		Meta: req.GetMetaJson(), Vis: visIn(req.GetVisibility()), TTL: time.Duration(req.GetTtlSeconds()) * time.Second, PostForm: req.GetPostForm()})
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &pb.PrepareUploadResponse{Id: uint64(p.ID), Method: p.Method, PutUrl: p.URL, Headers: p.Headers, FormFields: p.FormFields,
+		ExpiresUnixMs: p.Expires.UnixMilli()}, nil
+}
+
+func (s *Server) CompleteUpload(ctx context.Context, req *pb.CompleteUploadRequest) (*pb.ObjectResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	o, err := s.svc.CompleteUpload(ctx, int64(req.GetId()), req.GetWriter())
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return objResp(o), nil
+}
+
 func (s *Server) Usage(ctx context.Context, req *pb.UsageRequest) (*pb.UsageResponse, error) {
 	if err := s.authorize(ctx); err != nil {
 		return nil, err
@@ -314,10 +342,13 @@ func mapErr(err error) error {
 		return status.Error(codes.ResourceExhausted, err.Error())
 	case errors.Is(err, service.ErrForbidden):
 		return status.Error(codes.PermissionDenied, err.Error())
-	case errors.Is(err, service.ErrNeedNet), errors.Is(err, store.ErrConflict):
+	case errors.Is(err, service.ErrNeedNet), errors.Is(err, store.ErrConflict), errors.Is(err, service.ErrNoBlobs), errors.Is(err, service.ErrMismatch):
 		return status.Error(codes.FailedPrecondition, err.Error())
-	case errors.Is(err, store.ErrNoTitle):
+	case errors.Is(err, store.ErrNoTitle), errors.Is(err, service.ErrNoUpload):
 		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, service.ErrBlobs):
+		log.Printf("title-storage: %v", err)
+		return status.Error(codes.Unavailable, "blob store unavailable")
 	}
 	// The account core being down is the caller's retry, not a service bug.
 	if c := status.Code(err); c == codes.Unavailable || c == codes.DeadlineExceeded {

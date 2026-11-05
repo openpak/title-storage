@@ -99,6 +99,9 @@ type Object struct {
 	Created    time.Time
 	Updated    time.Time
 	Expires    *time.Time
+	BlobKey    string // non-empty: the body lives in the blob tier under this key, Body is empty
+	SHA256     string // the blob's digest when the uploader gave one
+	GetURL     string // not stored: the presigned GET the service adds to a blob-backed object
 }
 
 // Reader is who is asking: the viewer's account (empty = anonymous) and, when the query can
@@ -161,6 +164,40 @@ CREATE INDEX IF NOT EXISTS objects_owner ON objects (owner);
 CREATE INDEX IF NOT EXISTS objects_name ON objects (title_key, collection, name);
 CREATE INDEX IF NOT EXISTS objects_list ON objects (title_key, collection, updated);
 CREATE INDEX IF NOT EXISTS objects_expiry ON objects (expires_at) WHERE expires_at IS NOT NULL;
+
+-- Blob tier (v0.3.0): a body in S3 instead of the row. uploads are prepared, not yet completed
+-- writes (the id is reserved; they hold quota until they complete or expire); blob_trash is every
+-- S3 key whose row is gone, deleted from the bucket by the caller and, on failure, by the janitor.
+ALTER TABLE objects ADD COLUMN IF NOT EXISTS blob_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE objects ADD COLUMN IF NOT EXISTS sha256 TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS uploads (
+    id          BIGINT PRIMARY KEY,
+    title_key   TEXT NOT NULL,
+    ns          TEXT NOT NULL DEFAULT '',
+    owner       TEXT NOT NULL,
+    collection  TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    info        BYTEA NOT NULL DEFAULT ''::bytea,
+    meta        JSONB NOT NULL DEFAULT '{}',
+    size        BIGINT NOT NULL,
+    sha256      TEXT NOT NULL DEFAULT '',
+    setter      TEXT NOT NULL DEFAULT '',
+    visibility  TEXT NOT NULL DEFAULT '',
+    network     TEXT NOT NULL DEFAULT '',
+    ttl_seconds INTEGER NOT NULL DEFAULT 0,
+    blob_key    TEXT NOT NULL UNIQUE,
+    created     TIMESTAMPTZ NOT NULL,
+    expires_at  TIMESTAMPTZ NOT NULL,
+    UNIQUE (title_key, ns, owner, collection, name)
+);
+CREATE INDEX IF NOT EXISTS uploads_owner ON uploads (owner);
+CREATE INDEX IF NOT EXISTS uploads_expiry ON uploads (expires_at);
+CREATE TABLE IF NOT EXISTS blob_trash (
+    key     TEXT PRIMARY KEY,
+    owner   TEXT NOT NULL DEFAULT '',
+    trashed TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS blob_trash_owner ON blob_trash (owner);
 
 INSERT INTO titles (key, name) VALUES ('terraria', 'Terraria') ON CONFLICT DO NOTHING;
 INSERT INTO title_keys (network, native_id, title_key) VALUES ('np', 'NPWR04270_00', 'terraria') ON CONFLICT DO NOTHING;
@@ -595,11 +632,16 @@ func nonNil(s []string) []string {
 
 // ---- objects ----
 
-const objCols = `id, title_key, owner, collection, name, info, meta::text, size, setter, visibility, network, created, updated, expires_at`
+const objCols = `id, title_key, owner, collection, name, info, meta::text, size, setter, visibility, network, created, updated, expires_at, blob_key, sha256`
+
+// objDst is the scan target list for objCols.
+func objDst(o *Object) []any {
+	return []any{&o.ID, &o.Title, &o.Owner, &o.Collection, &o.Name, &o.Info, &o.Meta, &o.Size, &o.Setter, &o.Visibility, &o.Network, &o.Created, &o.Updated, &o.Expires, &o.BlobKey, &o.SHA256}
+}
 
 func scanObject(row pgx.Row, withBody bool) (Object, error) {
 	var o Object
-	dst := []any{&o.ID, &o.Title, &o.Owner, &o.Collection, &o.Name, &o.Info, &o.Meta, &o.Size, &o.Setter, &o.Visibility, &o.Network, &o.Created, &o.Updated, &o.Expires}
+	dst := objDst(&o)
 	if withBody {
 		dst = append(dst, &o.Body)
 	}
@@ -668,8 +710,7 @@ func (s *Store) PutObject(ctx context.Context, p ObjPut) (o Object, conditionFai
 		p.Body = []byte{}
 	}
 	// An expired row counts as absent.
-	if _, err = tx.Exec(ctx, `DELETE FROM objects WHERE title_key=$1 AND ns=$2 AND owner=$3 AND collection=$4 AND name=$5 AND expires_at <= now()`,
-		p.T.Key, ns, p.Owner, p.Collection, p.Name); err != nil {
+	if _, err = s.expireKey(ctx, tx, p.T.Key, ns, p.Owner, p.Collection, p.Name); err != nil {
 		return o, false, err
 	}
 	var cur *Object
@@ -684,10 +725,8 @@ func (s *Store) PutObject(ctx context.Context, p ObjPut) (o Object, conditionFai
 	if p.Cond != nil && !p.Cond(cur) {
 		return o, true, nil
 	}
-	var usedBytes int64
-	var usedObjs int
-	if err = tx.QueryRow(ctx, `SELECT COALESCE(sum(size),0), count(*) FROM objects WHERE title_key=$1 AND owner=$2 AND (expires_at IS NULL OR expires_at > now())`,
-		p.T.Key, p.Owner).Scan(&usedBytes, &usedObjs); err != nil {
+	usedBytes, usedObjs, err := used(ctx, tx, p.T.Key, p.Owner)
+	if err != nil {
 		return o, false, err
 	}
 	newBytes, newObjs := usedBytes+int64(len(p.Body)), usedObjs
@@ -712,13 +751,16 @@ func (s *Store) PutObject(ctx context.Context, p ObjPut) (o Object, conditionFai
 	if cur != nil {
 		id = cur.ID
 	}
-	// ponytail: bodies are bytea in Postgres (capped by max_object_bytes). If a title needs
-	// large objects (courses with replays, ghosts), keep this row as the index and move body to
-	// an S3/WebDAV backend like saves' blob package, behind the same Put/Get calls.
+	// An inline write over a blob-backed object drops the blob (PrepareUpload is the large path).
+	if cur != nil && cur.BlobKey != "" {
+		if err = trash(ctx, tx, p.Owner, cur.BlobKey); err != nil {
+			return o, false, err
+		}
+	}
 	row := tx.QueryRow(ctx, `INSERT INTO objects (id, title_key, ns, owner, collection, name, info, meta, body, size, setter, visibility, network, created, updated, expires_at)
 		VALUES (COALESCE(NULLIF($1::bigint,0), nextval('objects_id_seq')), $2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$14,$15)
 		ON CONFLICT (title_key, ns, owner, collection, name) DO UPDATE SET info=$7, meta=$8::jsonb, body=$9, size=$10, setter=$11,
-		  visibility = COALESCE(NULLIF($16,''), objects.visibility), network=$13, updated=$14, expires_at=$15
+		  visibility = COALESCE(NULLIF($16,''), objects.visibility), network=$13, updated=$14, expires_at=$15, blob_key='', sha256=''
 		RETURNING `+objCols,
 		id, p.T.Key, ns, p.Owner, p.Collection, p.Name, p.Info, p.Meta, p.Body, int64(len(p.Body)), p.Setter, firstNonEmpty(p.Vis, p.T.DefaultVis), p.Network, now, expires, p.Vis)
 	o, err = scanObject(row, false)
@@ -773,7 +815,7 @@ func (s *Store) ObjectByID(ctx context.Context, id int64, withBody bool) (*Objec
 	var ns string
 	row := s.DB.QueryRow(ctx, `SELECT ns, `+objCols+bodyCol(withBody)+` FROM objects WHERE id=$1 AND (expires_at IS NULL OR expires_at > now())`, id)
 	var o Object
-	dst := []any{&ns, &o.ID, &o.Title, &o.Owner, &o.Collection, &o.Name, &o.Info, &o.Meta, &o.Size, &o.Setter, &o.Visibility, &o.Network, &o.Created, &o.Updated, &o.Expires}
+	dst := append([]any{&ns}, objDst(&o)...)
 	if withBody {
 		dst = append(dst, &o.Body)
 	}
@@ -832,7 +874,7 @@ func (s *Store) ListObjects(ctx context.Context, q ObjQuery) ([]Object, int, err
 	hits := 0
 	for rows.Next() {
 		var o Object
-		dst := []any{&o.ID, &o.Title, &o.Owner, &o.Collection, &o.Name, &o.Info, &o.Meta, &o.Size, &o.Setter, &o.Visibility, &o.Network, &o.Created, &o.Updated, &o.Expires}
+		dst := objDst(&o)
 		if q.WithBody {
 			dst = append(dst, &o.Body)
 		}
@@ -846,26 +888,272 @@ func (s *Store) ListObjects(ctx context.Context, q ObjQuery) ([]Object, int, err
 }
 
 // DeleteObjects removes one owner's objects in a collection (the named ones, or all of them).
+// Their blobs go to the trash in the same transaction.
 func (s *Store) DeleteObjects(ctx context.Context, t Title, network, owner, collection string, names []string) (int64, error) {
-	tag, err := s.DB.Exec(ctx, `DELETE FROM objects WHERE title_key=$1 AND ns=$2 AND owner=$3 AND collection=$4 AND (cardinality($5::text[]) = 0 OR name = ANY($5))`,
-		t.Key, t.NS(network), owner, collection, nonNil(names))
-	return tag.RowsAffected(), err
+	var n int64
+	err := s.DB.QueryRow(ctx, `WITH d AS (
+		  DELETE FROM objects WHERE title_key=$1 AND ns=$2 AND owner=$3 AND collection=$4 AND (cardinality($5::text[]) = 0 OR name = ANY($5))
+		  RETURNING owner, blob_key),
+		tr AS (INSERT INTO blob_trash (key, owner) SELECT blob_key, owner FROM d WHERE blob_key <> '' ON CONFLICT DO NOTHING)
+		SELECT count(*) FROM d`,
+		t.Key, t.NS(network), owner, collection, nonNil(names)).Scan(&n)
+	return n, err
 }
 
-// Expire deletes objects past their expiry.
+// Expire deletes objects past their expiry and uploads never completed in time, trashing their
+// blobs (an abandoned upload may have sent its bytes).
 func (s *Store) Expire(ctx context.Context) (int64, error) {
-	tag, err := s.DB.Exec(ctx, `DELETE FROM objects WHERE expires_at IS NOT NULL AND expires_at <= now()`)
+	var n int64
+	err := s.DB.QueryRow(ctx, `WITH o AS (DELETE FROM objects WHERE expires_at IS NOT NULL AND expires_at <= now() RETURNING owner, blob_key),
+		u AS (DELETE FROM uploads WHERE expires_at <= now() RETURNING owner, blob_key),
+		tr AS (INSERT INTO blob_trash (key, owner)
+		  SELECT blob_key, owner FROM o WHERE blob_key <> '' UNION ALL SELECT blob_key, owner FROM u
+		  ON CONFLICT DO NOTHING)
+		SELECT (SELECT count(*) FROM o) + (SELECT count(*) FROM u)`).Scan(&n)
+	return n, err
+}
+
+// EraseAccount deletes everything an account owns, in every title: variables, objects and pending
+// uploads. Blobs go to the trash under the account (the caller empties it: DrainTrash).
+func (s *Store) EraseAccount(ctx context.Context, account string) (int64, error) {
+	var n int64
+	err := s.DB.QueryRow(ctx, `WITH v AS (DELETE FROM variables WHERE owner = $1 RETURNING 1),
+		o AS (DELETE FROM objects WHERE owner = $1 RETURNING owner, blob_key),
+		u AS (DELETE FROM uploads WHERE owner = $1 RETURNING owner, blob_key),
+		tr AS (INSERT INTO blob_trash (key, owner)
+		  SELECT blob_key, owner FROM o WHERE blob_key <> '' UNION ALL SELECT blob_key, owner FROM u
+		  ON CONFLICT DO NOTHING)
+		SELECT (SELECT count(*) FROM v) + (SELECT count(*) FROM o) + (SELECT count(*) FROM u)`, account).Scan(&n)
+	return n, err
+}
+
+// ---- blob tier ----
+
+func trash(ctx context.Context, tx pgx.Tx, owner, key string) error {
+	_, err := tx.Exec(ctx, `INSERT INTO blob_trash (key, owner) VALUES ($1, $2) ON CONFLICT DO NOTHING`, key, owner)
+	return err
+}
+
+// used is what an owner holds in a title against the quota: live objects plus pending uploads
+// (an upload reserves its bytes and one object until it completes or expires).
+func used(ctx context.Context, tx pgx.Tx, titleKey, owner string) (bytes int64, objects int, err error) {
+	err = tx.QueryRow(ctx, `SELECT COALESCE(sum(size),0), count(*) FROM (
+		  SELECT size FROM objects WHERE title_key=$1 AND owner=$2 AND (expires_at IS NULL OR expires_at > now())
+		  UNION ALL
+		  SELECT size FROM uploads WHERE title_key=$1 AND owner=$2 AND expires_at > now()) x`, titleKey, owner).Scan(&bytes, &objects)
+	return
+}
+
+// Upload is a prepared write: the object it will become, waiting for its body in the blob tier.
+type Upload struct {
+	ID         int64
+	T          Title
+	Network    string
+	Owner      string
+	Setter     string
+	Collection string
+	Name       string // "" = named by the id
+	Info       []byte
+	Meta       string
+	Size       int64
+	SHA256     string
+	Vis        string
+	TTL        time.Duration // of the object once complete
+	BlobKey    string
+	Expires    time.Time // of the upload
+}
+
+// PrepareUpload reserves the object's id and the quota for an upload. A second prepare for the
+// same object replaces the first (its blob, if it was sent, is trashed). keyFor names the blob
+// from the id. The id is the existing object's when the upload replaces one.
+func (s *Store) PrepareUpload(ctx context.Context, u Upload, keyFor func(id int64) string) (Upload, error) {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return u, err
+	}
+	defer tx.Rollback(ctx)
+	ns := u.T.NS(u.Network)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 1))`, u.T.Key+"|"+u.Owner); err != nil {
+		return u, err
+	}
+	if u.Name != "" {
+		// Expired rows count as absent, as in PutObject.
+		if _, err = s.expireKey(ctx, tx, u.T.Key, ns, u.Owner, u.Collection, u.Name); err != nil {
+			return u, err
+		}
+	}
+	var curID, curSize int64
+	if u.Name != "" {
+		err = tx.QueryRow(ctx, `SELECT id, size FROM objects WHERE title_key=$1 AND ns=$2 AND owner=$3 AND collection=$4 AND name=$5 FOR UPDATE`,
+			u.T.Key, ns, u.Owner, u.Collection, u.Name).Scan(&curID, &curSize)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return u, err
+		}
+		var oldKey string
+		var oldSize int64
+		err = tx.QueryRow(ctx, `DELETE FROM uploads WHERE title_key=$1 AND ns=$2 AND owner=$3 AND collection=$4 AND name=$5 RETURNING blob_key, size`,
+			u.T.Key, ns, u.Owner, u.Collection, u.Name).Scan(&oldKey, &oldSize)
+		switch {
+		case err == nil:
+			if err = trash(ctx, tx, u.Owner, oldKey); err != nil {
+				return u, err
+			}
+		case !errors.Is(err, pgx.ErrNoRows):
+			return u, err
+		}
+	}
+	usedBytes, usedObjs, err := used(ctx, tx, u.T.Key, u.Owner)
+	if err != nil {
+		return u, err
+	}
+	// A replacement counts only the difference, as in PutObject (while it is pending the old
+	// object still counts too, so other writes see both).
+	if usedBytes-curSize+u.Size > u.T.QuotaBytes || usedObjs+1-boolInt(curID != 0) > u.T.QuotaObjects {
+		return u, ErrQuota
+	}
+	if curID != 0 {
+		u.ID = curID
+	} else if err = tx.QueryRow(ctx, `SELECT nextval('objects_id_seq')`).Scan(&u.ID); err != nil {
+		return u, err
+	}
+	if u.Name == "" {
+		u.Name = strconv.FormatInt(u.ID, 10)
+	}
+	if u.Info == nil {
+		u.Info = []byte{}
+	}
+	if u.Meta == "" {
+		u.Meta = "{}"
+	}
+	u.BlobKey = keyFor(u.ID)
+	now := Now()
+	_, err = tx.Exec(ctx, `INSERT INTO uploads (id, title_key, ns, owner, collection, name, info, meta, size, sha256, setter, visibility, network, ttl_seconds, blob_key, created, expires_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+		u.ID, u.T.Key, ns, u.Owner, u.Collection, u.Name, u.Info, u.Meta, u.Size, u.SHA256, u.Setter, u.Vis, u.Network, int(u.TTL/time.Second), u.BlobKey, now, u.Expires)
+	if err != nil {
+		return u, err
+	}
+	return u, tx.Commit(ctx)
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// expireKey drops one expired object (trashing its blob).
+func (s *Store) expireKey(ctx context.Context, tx pgx.Tx, title, ns, owner, collection, name string) (int64, error) {
+	tag, err := tx.Exec(ctx, `WITH d AS (DELETE FROM objects WHERE title_key=$1 AND ns=$2 AND owner=$3 AND collection=$4 AND name=$5 AND expires_at <= now() RETURNING owner, blob_key)
+		INSERT INTO blob_trash (key, owner) SELECT blob_key, owner FROM d WHERE blob_key <> '' ON CONFLICT DO NOTHING`,
+		title, ns, owner, collection, name)
 	return tag.RowsAffected(), err
 }
 
-// EraseAccount deletes everything an account owns, in every title.
-func (s *Store) EraseAccount(ctx context.Context, account string) (int64, error) {
-	a, err := s.DB.Exec(ctx, `DELETE FROM variables WHERE owner = $1`, account)
-	if err != nil {
-		return 0, err
+// PendingUpload loads a prepared upload that has not expired; nil when there is none.
+func (s *Store) PendingUpload(ctx context.Context, id int64) (*Upload, error) {
+	var u Upload
+	var ttl int
+	err := s.DB.QueryRow(ctx, `SELECT id, title_key, network, owner, setter, collection, name, info, meta::text, size, sha256, visibility, ttl_seconds, blob_key, expires_at
+		FROM uploads WHERE id=$1 AND expires_at > now()`, id).
+		Scan(&u.ID, &u.T.Key, &u.Network, &u.Owner, &u.Setter, &u.Collection, &u.Name, &u.Info, &u.Meta, &u.Size, &u.SHA256, &u.Vis, &ttl, &u.BlobKey, &u.Expires)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
 	}
-	b, err := s.DB.Exec(ctx, `DELETE FROM objects WHERE owner = $1`, account)
-	return a.RowsAffected() + b.RowsAffected(), err
+	if err != nil {
+		return nil, err
+	}
+	u.TTL = time.Duration(ttl) * time.Second
+	return &u, nil
+}
+
+// CompleteUpload turns a verified upload into its object (replacing the one of the same name; that
+// one's blob is trashed). ok=false when the upload is gone (expired, replaced or completed).
+func (s *Store) CompleteUpload(ctx context.Context, id int64, blobKey string) (o Object, ok bool, err error) {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return o, false, err
+	}
+	defer tx.Rollback(ctx)
+	// The per-owner lock first, as PrepareUpload takes it, so the two never wait on each other.
+	var lockTitle, lockOwner string
+	err = tx.QueryRow(ctx, `SELECT title_key, owner FROM uploads WHERE id=$1`, id).Scan(&lockTitle, &lockOwner)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return o, false, nil
+	}
+	if err != nil {
+		return o, false, err
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 1))`, lockTitle+"|"+lockOwner); err != nil {
+		return o, false, err
+	}
+	var u Upload
+	var ns, vis string
+	var ttl int
+	err = tx.QueryRow(ctx, `DELETE FROM uploads WHERE id=$1 AND blob_key=$2 AND expires_at > now()
+		RETURNING title_key, ns, network, owner, setter, collection, name, info, meta::text, size, sha256, visibility, ttl_seconds`, id, blobKey).
+		Scan(&u.T.Key, &ns, &u.Network, &u.Owner, &u.Setter, &u.Collection, &u.Name, &u.Info, &u.Meta, &u.Size, &u.SHA256, &vis, &ttl)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return o, false, nil
+	}
+	if err != nil {
+		return o, false, err
+	}
+	t, err := scanTitle(tx.QueryRow(ctx, `SELECT `+titleCols+` FROM titles WHERE key = $1`, u.T.Key))
+	if err != nil {
+		return o, false, err
+	}
+	if _, err = s.expireKey(ctx, tx, u.T.Key, ns, u.Owner, u.Collection, u.Name); err != nil {
+		return o, false, err
+	}
+	var cur *Object
+	c, err := scanObject(tx.QueryRow(ctx, `SELECT `+objCols+` FROM objects WHERE title_key=$1 AND ns=$2 AND owner=$3 AND collection=$4 AND name=$5 FOR UPDATE`,
+		u.T.Key, ns, u.Owner, u.Collection, u.Name), false)
+	switch {
+	case err == nil:
+		cur = &c
+	case !errors.Is(err, pgx.ErrNoRows):
+		return o, false, err
+	}
+	if cur != nil && cur.BlobKey != "" && cur.BlobKey != blobKey {
+		if err = trash(ctx, tx, u.Owner, cur.BlobKey); err != nil {
+			return o, false, err
+		}
+	}
+	now := Now()
+	var expires *time.Time
+	if ttl > 0 {
+		e := now.Add(time.Duration(ttl) * time.Second)
+		expires = &e
+	} else if cur != nil {
+		expires = cur.Expires
+	}
+	o, err = scanObject(tx.QueryRow(ctx, `INSERT INTO objects (id, title_key, ns, owner, collection, name, info, meta, body, size, setter, visibility, network, created, updated, expires_at, blob_key, sha256)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,''::bytea,$9,$10,$11,$12,$13,$13,$14,$15,$16)
+		ON CONFLICT (title_key, ns, owner, collection, name) DO UPDATE SET info=$7, meta=$8::jsonb, body=''::bytea, size=$9, setter=$10,
+		  visibility = COALESCE(NULLIF($17,''), objects.visibility), network=$12, updated=$13, expires_at=$14, blob_key=$15, sha256=$16
+		RETURNING `+objCols,
+		id, u.T.Key, ns, u.Owner, u.Collection, u.Name, u.Info, u.Meta, u.Size, u.Setter, firstNonEmpty(vis, t.DefaultVis), u.Network, now, expires, blobKey, u.SHA256, vis), false)
+	if err != nil {
+		return o, false, err
+	}
+	return o, true, tx.Commit(ctx)
+}
+
+// Trash lists trashed blob keys: one owner's, or (owner "") any, oldest first.
+func (s *Store) Trash(ctx context.Context, owner string, limit int) ([]string, error) {
+	rows, err := s.DB.Query(ctx, `SELECT key FROM blob_trash WHERE ($1 = '' OR owner = $1) ORDER BY trashed LIMIT $2`, owner, limit)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
+// Untrash forgets keys whose blobs are deleted.
+func (s *Store) Untrash(ctx context.Context, keys []string) error {
+	_, err := s.DB.Exec(ctx, `DELETE FROM blob_trash WHERE key = ANY($1)`, keys)
+	return err
 }
 
 // ValidJSONObject reports whether s is a JSON object (or empty).

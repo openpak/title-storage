@@ -29,6 +29,8 @@ const (
 	TitleStorage_GetObjectByID_FullMethodName   = "/openpak.titlestorage.v1.TitleStorage/GetObjectByID"
 	TitleStorage_ListObjects_FullMethodName     = "/openpak.titlestorage.v1.TitleStorage/ListObjects"
 	TitleStorage_DeleteObjects_FullMethodName   = "/openpak.titlestorage.v1.TitleStorage/DeleteObjects"
+	TitleStorage_PrepareUpload_FullMethodName   = "/openpak.titlestorage.v1.TitleStorage/PrepareUpload"
+	TitleStorage_CompleteUpload_FullMethodName  = "/openpak.titlestorage.v1.TitleStorage/CompleteUpload"
 	TitleStorage_Usage_FullMethodName           = "/openpak.titlestorage.v1.TitleStorage/Usage"
 	TitleStorage_MapTitle_FullMethodName        = "/openpak.titlestorage.v1.TitleStorage/MapTitle"
 	TitleStorage_UpsertTitle_FullMethodName     = "/openpak.titlestorage.v1.TitleStorage/UpsertTitle"
@@ -75,6 +77,14 @@ type TitleStorageClient interface {
 	GetObjectByID(ctx context.Context, in *GetObjectByIDRequest, opts ...grpc.CallOption) (*ObjectResponse, error)
 	ListObjects(ctx context.Context, in *ListObjectsRequest, opts ...grpc.CallOption) (*ListObjectsResponse, error)
 	DeleteObjects(ctx context.Context, in *DeleteObjectsRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
+	// Blob tier: a body that should not travel inline (a video, a course with replays) goes to S3
+	// directly from the console. PrepareUpload checks the quota and the size cap, reserves the
+	// object id and returns a short-lived presigned request; the console sends the bytes; the
+	// adapter calls CompleteUpload, which checks the size (and the digest when one was given) and
+	// makes the object visible. Reads of a blob-backed object carry get_url (presigned) instead of
+	// a body. An upload not completed within the upload lifetime expires and its bytes are deleted.
+	PrepareUpload(ctx context.Context, in *PrepareUploadRequest, opts ...grpc.CallOption) (*PrepareUploadResponse, error)
+	CompleteUpload(ctx context.Context, in *CompleteUploadRequest, opts ...grpc.CallOption) (*ObjectResponse, error)
 	// Usage reports what one owner holds in one title against the quota.
 	Usage(ctx context.Context, in *UsageRequest, opts ...grpc.CallOption) (*UsageResponse, error)
 	// Operator calls.
@@ -191,6 +201,26 @@ func (c *titleStorageClient) DeleteObjects(ctx context.Context, in *DeleteObject
 	return out, nil
 }
 
+func (c *titleStorageClient) PrepareUpload(ctx context.Context, in *PrepareUploadRequest, opts ...grpc.CallOption) (*PrepareUploadResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PrepareUploadResponse)
+	err := c.cc.Invoke(ctx, TitleStorage_PrepareUpload_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *titleStorageClient) CompleteUpload(ctx context.Context, in *CompleteUploadRequest, opts ...grpc.CallOption) (*ObjectResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ObjectResponse)
+	err := c.cc.Invoke(ctx, TitleStorage_CompleteUpload_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *titleStorageClient) Usage(ctx context.Context, in *UsageRequest, opts ...grpc.CallOption) (*UsageResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(UsageResponse)
@@ -271,6 +301,14 @@ type TitleStorageServer interface {
 	GetObjectByID(context.Context, *GetObjectByIDRequest) (*ObjectResponse, error)
 	ListObjects(context.Context, *ListObjectsRequest) (*ListObjectsResponse, error)
 	DeleteObjects(context.Context, *DeleteObjectsRequest) (*DeleteResponse, error)
+	// Blob tier: a body that should not travel inline (a video, a course with replays) goes to S3
+	// directly from the console. PrepareUpload checks the quota and the size cap, reserves the
+	// object id and returns a short-lived presigned request; the console sends the bytes; the
+	// adapter calls CompleteUpload, which checks the size (and the digest when one was given) and
+	// makes the object visible. Reads of a blob-backed object carry get_url (presigned) instead of
+	// a body. An upload not completed within the upload lifetime expires and its bytes are deleted.
+	PrepareUpload(context.Context, *PrepareUploadRequest) (*PrepareUploadResponse, error)
+	CompleteUpload(context.Context, *CompleteUploadRequest) (*ObjectResponse, error)
 	// Usage reports what one owner holds in one title against the quota.
 	Usage(context.Context, *UsageRequest) (*UsageResponse, error)
 	// Operator calls.
@@ -316,6 +354,12 @@ func (UnimplementedTitleStorageServer) ListObjects(context.Context, *ListObjects
 }
 func (UnimplementedTitleStorageServer) DeleteObjects(context.Context, *DeleteObjectsRequest) (*DeleteResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteObjects not implemented")
+}
+func (UnimplementedTitleStorageServer) PrepareUpload(context.Context, *PrepareUploadRequest) (*PrepareUploadResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PrepareUpload not implemented")
+}
+func (UnimplementedTitleStorageServer) CompleteUpload(context.Context, *CompleteUploadRequest) (*ObjectResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CompleteUpload not implemented")
 }
 func (UnimplementedTitleStorageServer) Usage(context.Context, *UsageRequest) (*UsageResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Usage not implemented")
@@ -530,6 +574,42 @@ func _TitleStorage_DeleteObjects_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TitleStorage_PrepareUpload_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PrepareUploadRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TitleStorageServer).PrepareUpload(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TitleStorage_PrepareUpload_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TitleStorageServer).PrepareUpload(ctx, req.(*PrepareUploadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _TitleStorage_CompleteUpload_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CompleteUploadRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TitleStorageServer).CompleteUpload(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TitleStorage_CompleteUpload_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TitleStorageServer).CompleteUpload(ctx, req.(*CompleteUploadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _TitleStorage_Usage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(UsageRequest)
 	if err := dec(in); err != nil {
@@ -648,6 +728,14 @@ var TitleStorage_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteObjects",
 			Handler:    _TitleStorage_DeleteObjects_Handler,
+		},
+		{
+			MethodName: "PrepareUpload",
+			Handler:    _TitleStorage_PrepareUpload_Handler,
+		},
+		{
+			MethodName: "CompleteUpload",
+			Handler:    _TitleStorage_CompleteUpload_Handler,
 		},
 		{
 			MethodName: "Usage",

@@ -42,6 +42,15 @@ service TitleStorage {
   rpc ListObjects(ListObjectsRequest) returns (ListObjectsResponse);
   rpc DeleteObjects(DeleteObjectsRequest) returns (DeleteResponse);
 
+  // Blob tier: a body that should not travel inline (a video, a course with replays) goes to S3
+  // directly from the console. PrepareUpload checks the quota and the size cap, reserves the
+  // object id and returns a short-lived presigned request; the console sends the bytes; the
+  // adapter calls CompleteUpload, which checks the size (and the digest when one was given) and
+  // makes the object visible. Reads of a blob-backed object carry get_url (presigned) instead of
+  // a body. An upload not completed within the upload lifetime expires and its bytes are deleted.
+  rpc PrepareUpload(PrepareUploadRequest) returns (PrepareUploadResponse);
+  rpc CompleteUpload(CompleteUploadRequest) returns (ObjectResponse);
+
   // Usage reports what one owner holds in one title against the quota.
   rpc Usage(UsageRequest) returns (UsageResponse);
 
@@ -177,6 +186,10 @@ message Object {
   int64  created_unix_ms = 13;
   int64  updated_unix_ms = 14;
   int64  expires_unix_ms = 15; // 0 = never
+  // Blob tier: set when the body lives in S3 (body is then always empty, include_body or not).
+  string get_url     = 16; // presigned GET, short-lived; empty for an inline object
+  bool   blob        = 17;
+  string sha256      = 18; // hex, when the uploader gave one
 }
 
 message PutObjectRequest {
@@ -244,6 +257,38 @@ message DeleteObjectsRequest {
   string writer  = 3;
   string collection = 4;
   repeated string names = 5; // empty = the whole collection
+}
+
+// ---- blob tier ----
+
+message PrepareUploadRequest {
+  TitleRef ref    = 1;
+  string owner    = 2;
+  string writer   = 3;
+  string setter   = 4;
+  string collection = 5; // default "default"
+  string name     = 6;   // empty: a new object named by its id
+  uint64 size     = 7;   // exact body size; at most the title's max_object_bytes, within quota
+  string sha256   = 8;   // optional lowercase hex; CompleteUpload checks it
+  bytes info      = 9;
+  string meta_json = 10;
+  Visibility visibility = 11;
+  uint32 ttl_seconds = 12; // of the object once complete (0 keeps the current expiry)
+  bool post_form  = 13;  // false: a PUT URL; true: a POST form (S3 POST policy, as NEX DataStore consoles send)
+}
+
+message PrepareUploadResponse {
+  uint64 id       = 1; // the object id it will have (the existing one's when it replaces an object)
+  string method   = 2; // "PUT" or "POST"
+  string put_url  = 3; // where to send the body
+  map<string, string> headers     = 4; // to send with the PUT
+  map<string, string> form_fields = 5; // POST only: the fields to send before the file field ("file")
+  int64  expires_unix_ms = 6; // the upload must be completed before this
+}
+
+message CompleteUploadRequest {
+  uint64 id     = 1;
+  string writer = 2; // the same rule as any write to the owner
 }
 
 // ---- quota ----
