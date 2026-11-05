@@ -845,6 +845,128 @@ func (s *Store) PutObject(ctx context.Context, p ObjPut) (o Object, conditionFai
 	return o, false, nil
 }
 
+// ErrNameTaken: a rename or move would collide with a live object (or a pending upload) of that
+// owner, collection and name.
+var ErrNameTaken = errors.New("title-storage: an object of that collection and name already exists")
+
+// ErrUploadPending: the object has an upload in flight; it cannot be renamed or moved until the
+// upload completes or expires.
+var ErrUploadPending = errors.New("title-storage: the object has a pending upload")
+
+// MetaUpdate is a metadata-only change to one object; nil / zero fields keep the stored value.
+type MetaUpdate struct {
+	ID         int64
+	Setter     string // "" keeps
+	Info       *[]byte
+	Meta       *string // replaces (a JSON object)
+	MetaMerge  string  // merged after Meta (a JSON object), "" = none
+	MaxMeta    int     // the merged metadata's limit in bytes
+	Name       *string
+	Collection *string
+	Vis        string // "" keeps visibility, recipients and the flag
+	Recipients []string
+	RecipFrnds bool
+	SetExpiry  bool
+	Expires    *time.Time // with SetExpiry: nil = never
+	Cond       func(*Object) bool
+}
+
+// ErrMetaTooLarge: the merged metadata is over the limit.
+var ErrMetaTooLarge = errors.New("title-storage: metadata too large")
+
+// UpdateObjectMeta changes an object's metadata in place. The body, size, blob, digest, id,
+// created time and ratings are never touched. found=false: no live object with that id.
+func (s *Store) UpdateObjectMeta(ctx context.Context, u MetaUpdate) (o Object, found, conditionFailed bool, err error) {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return o, false, false, err
+	}
+	defer tx.Rollback(ctx)
+	// The per-owner lock first, as PutObject takes it, then the row.
+	var title, owner string
+	err = tx.QueryRow(ctx, `SELECT title_key, owner FROM objects WHERE id=$1`, u.ID).Scan(&title, &owner)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return o, false, false, nil
+	}
+	if err != nil {
+		return o, false, false, err
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 1))`, title+"|"+owner); err != nil {
+		return o, false, false, err
+	}
+	var ns string
+	var cur Object
+	dst := append([]any{&ns}, objDst(&cur)...)
+	err = tx.QueryRow(ctx, `SELECT ns, `+objCols+` FROM objects WHERE id=$1 AND (expires_at IS NULL OR expires_at > now()) FOR UPDATE`, u.ID).Scan(dst...)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return o, false, false, nil
+	}
+	if err != nil {
+		return o, false, false, err
+	}
+	if u.Cond != nil && !u.Cond(&cur) {
+		return o, true, true, nil
+	}
+	name, coll := cur.Name, cur.Collection
+	if u.Name != nil {
+		name = *u.Name
+	}
+	if u.Collection != nil {
+		coll = *u.Collection
+	}
+	if name != cur.Name || coll != cur.Collection {
+		var n int
+		if err = tx.QueryRow(ctx, `SELECT count(*) FROM uploads WHERE id=$1 AND expires_at > now()`, u.ID).Scan(&n); err != nil {
+			return o, false, false, err
+		}
+		if n > 0 {
+			return o, false, false, ErrUploadPending
+		}
+		// An expired namesake counts as absent, as in PutObject; a live one or a pending upload
+		// for that name is a collision.
+		if _, err = s.expireKey(ctx, tx, title, ns, owner, coll, name); err != nil {
+			return o, false, false, err
+		}
+		if err = tx.QueryRow(ctx, `SELECT (SELECT count(*) FROM objects WHERE title_key=$1 AND ns=$2 AND owner=$3 AND collection=$4 AND name=$5)
+			+ (SELECT count(*) FROM uploads WHERE title_key=$1 AND ns=$2 AND owner=$3 AND collection=$4 AND name=$5 AND expires_at > now())`,
+			title, ns, owner, coll, name).Scan(&n); err != nil {
+			return o, false, false, err
+		}
+		if n > 0 {
+			return o, false, false, ErrNameTaken
+		}
+	}
+	var info, meta, merge any
+	if u.Info != nil {
+		info = *u.Info
+	}
+	if u.Meta != nil {
+		meta = *u.Meta
+	}
+	if u.MetaMerge != "" {
+		merge = u.MetaMerge
+	}
+	o, err = scanObject(tx.QueryRow(ctx, `UPDATE objects SET
+		  info = COALESCE($2::bytea, info),
+		  meta = COALESCE($3::jsonb, meta) || COALESCE($4::jsonb, '{}'::jsonb),
+		  name = $5, collection = $6,
+		  visibility = COALESCE(NULLIF($7, ''), visibility),
+		  recipients = CASE WHEN $7 = '' THEN recipients ELSE $8 END,
+		  recipients_friends = CASE WHEN $7 = '' THEN recipients_friends ELSE $9 END,
+		  expires_at = CASE WHEN $10 THEN $11 ELSE expires_at END,
+		  setter = COALESCE(NULLIF($12, ''), setter),
+		  updated = $13
+		WHERE id = $1 RETURNING `+objCols,
+		u.ID, info, meta, merge, name, coll, u.Vis, nonNil(u.Recipients), u.RecipFrnds, u.SetExpiry, u.Expires, u.Setter, Now()), false)
+	if err != nil {
+		return o, false, false, err
+	}
+	if u.MaxMeta > 0 && len(o.Meta) > u.MaxMeta {
+		return Object{}, false, false, ErrMetaTooLarge
+	}
+	return o, true, false, tx.Commit(ctx)
+}
+
 func firstNonEmpty(a, b string) string {
 	if a != "" {
 		return a

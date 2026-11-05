@@ -43,6 +43,11 @@ service TitleStorage {
   rpc GetObjectByID(GetObjectByIDRequest) returns (ObjectResponse);
   rpc ListObjects(ListObjectsRequest) returns (ListObjectsResponse);
   rpc DeleteObjects(DeleteObjectsRequest) returns (DeleteResponse);
+  // UpdateObjectMeta (v0.7.0) changes an object's metadata only: info, meta_json (replace and/or
+  // merge), name, collection, visibility and recipients, expiry, setter. It never touches the body
+  // (inline or blob), the size, the id or the ratings. PutObject is the other way round: it
+  // replaces the whole object, and over a blob-backed object it drops the blob.
+  rpc UpdateObjectMeta(UpdateObjectMetaRequest) returns (ObjectResponse);
 
   // Blob tier: a body that should not travel inline (a video, a course with replays) goes to S3
   // directly from the console. PrepareUpload checks the quota and the size cap, reserves the
@@ -305,6 +310,31 @@ message ListObjectsRequest {
 message ListObjectsResponse {
   repeated Object objects = 1;
   uint32 hits = 2;
+}
+
+// UpdateObjectMetaRequest: every field is optional and only the fields set change (at least one
+// must be set). The writer follows the write rule for the object's owner. found=false is "no such
+// object" (missing, expired or another network's on a per-network title).
+message UpdateObjectMetaRequest {
+  string network = 1; // the caller's network (a per-network title hides other networks' objects)
+  uint64 id      = 2;
+  string writer  = 3;
+  string setter  = 4;           // empty keeps the stored setter
+  optional bytes info = 5;      // at most 4096 bytes (NEX UpdateObjectMetaBinary)
+  optional string meta_json = 6; // replaces the metadata (a JSON object)
+  // Merged into the metadata after meta_json (top-level keys, jsonb ||; a key set to null stays as
+  // null): tags, period, flags without a read-modify-write. The result is at most 16 KiB.
+  string meta_merge_json = 7;
+  optional string name = 8;       // rename within the owner (AlreadyExists when taken)
+  optional string collection = 9; // move (NEX UpdateObjectDataType); AlreadyExists when the name is taken there
+  // UNSPECIFIED keeps visibility, recipients and the flag; set: all three are replaced (as PutObject).
+  Visibility visibility = 10;
+  repeated string recipients = 11;
+  bool recipients_include_friends = 12;
+  optional int64 expires_unix_ms = 13; // 0 = never expires; otherwise a future Unix-ms time (NEX period)
+  // Optimistic check against the stored object (its updated time and setter, as PutObject):
+  // condition_failed=true and nothing changes when it does not hold.
+  Condition condition = 14;
 }
 
 message DeleteObjectsRequest {

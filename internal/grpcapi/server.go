@@ -344,6 +344,29 @@ func (s *Server) ListObjects(ctx context.Context, req *pb.ListObjectsRequest) (*
 	return out, nil
 }
 
+func (s *Server) UpdateObjectMeta(ctx context.Context, req *pb.UpdateObjectMetaRequest) (*pb.ObjectResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	c := service.MetaChange{Writer: req.GetWriter(), Setter: req.GetSetter(), Meta: req.MetaJson, MetaMerge: req.GetMetaMergeJson(),
+		Name: req.Name, Collection: req.Collection, Vis: visIn(req.GetVisibility()), Recipients: req.GetRecipients(),
+		RecipientsFriends: req.GetRecipientsIncludeFriends(), Expires: req.ExpiresUnixMs, Cond: cond(req.GetCondition())}
+	if req.Info != nil {
+		c.Info = &req.Info
+	}
+	o, found, failed, err := s.svc.UpdateObjectMeta(ctx, req.GetNetwork(), int64(req.GetId()), c)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if failed {
+		return &pb.ObjectResponse{Found: true, ConditionFailed: true}, nil
+	}
+	if !found {
+		return &pb.ObjectResponse{}, nil
+	}
+	return objResp(&o), nil
+}
+
 func (s *Server) DeleteObjects(ctx context.Context, req *pb.DeleteObjectsRequest) (*pb.DeleteResponse, error) {
 	if err := s.authorize(ctx); err != nil {
 		return nil, err
@@ -459,10 +482,13 @@ func mapErr(err error) error {
 		return status.Error(codes.ResourceExhausted, err.Error())
 	case errors.Is(err, service.ErrForbidden), errors.Is(err, service.ErrSelfRating):
 		return status.Error(codes.PermissionDenied, err.Error())
-	case errors.Is(err, service.ErrNeedNet), errors.Is(err, store.ErrConflict), errors.Is(err, service.ErrNoBlobs), errors.Is(err, service.ErrMismatch):
+	case errors.Is(err, service.ErrNeedNet), errors.Is(err, store.ErrConflict), errors.Is(err, service.ErrNoBlobs), errors.Is(err, service.ErrMismatch),
+		errors.Is(err, store.ErrUploadPending):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, store.ErrNoTitle), errors.Is(err, service.ErrNoUpload):
 		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, store.ErrNameTaken):
+		return status.Error(codes.AlreadyExists, err.Error())
 	case errors.Is(err, service.ErrBlobs):
 		log.Printf("title-storage: %v", err)
 		return status.Error(codes.Unavailable, "blob store unavailable")

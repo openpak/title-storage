@@ -81,8 +81,37 @@ that prints centiseconds can echo them back and match.
 | `GetObject(ref, viewer, owner, collection, name, include_body)` | `found=false` for missing, expired or unreadable. With `owner` empty it finds the newest object of that collection and name under any owner (for upload references that are unguessable by construction; the viewer rules still apply) |
 | `GetObjectByID(network, viewer, id, include_body)` | the same by global id |
 | `ListObjects(ref, viewer, owners[] or friends_of_viewer [+include_self] or all_owners, exclude_owners[], collection, collections[], names[], meta_filter_json, meta_range_json, created_after_ms, created_before_ms, updated_after_ms, updated_before_ms, sort, ascending, offset, limit, include_body, received)` | the search; see below |
+| `UpdateObjectMeta(network, id, writer, setter, info?, meta_json?, meta_merge_json, name?, collection?, visibility, recipients[], recipients_include_friends, expires_unix_ms?, condition)` | metadata only (v0.7.0); see below |
 | `DeleteObjects(ref, owner, writer, collection, names[])` | empty `names` = the whole collection |
 | `Usage(ref, owner)` | bytes, objects, variables and the limits that apply |
+
+### Metadata-only updates (`UpdateObjectMeta`, v0.7.0)
+
+`UpdateObjectMeta` changes what describes an object and nothing it holds: the body (inline or in
+the bucket), `size`, `sha256`, `id`, `created` and the rating slots and ratings stay exactly as they
+are. Only the fields set change, and at least one must be set:
+
+* `info` (present, even empty, replaces it; at most 4096 bytes), `meta_json` (replaces the
+  metadata), `meta_merge_json` (top-level keys merged in after that, jsonb `||`; the result is at
+  most 16 KiB): tags, period, flags and the like live in the metadata.
+* `name`, `collection`: rename or move within the owner. `AlreadyExists` when a live object or a
+  pending upload already has that collection and name; `FailedPrecondition` while an upload for
+  this object is in flight.
+* `visibility` with `recipients` / `recipients_include_friends`: as `PutObject` (unspecified keeps
+  all three; recipients without a visibility are `InvalidArgument`).
+* `expires_unix_ms`: `0` never expires, otherwise a future time.
+* `setter`: empty keeps the stored one. `updated` always moves to now.
+* `condition` is the optimistic version check: `expect_updated_unix_ms` (the `updated_unix_ms`
+  the caller read) and/or `expect_setter`; when it does not hold the answer is
+  `found=true, condition_failed=true` and nothing changes.
+
+The writer follows the write rule for the object's owner. `found=false` is no such object (missing,
+expired, or another network's on a per-network title).
+
+**`PutObject` is different on purpose**: it replaces the whole object (body, info, metadata), and
+over a blob-backed object it drops the blob (the bytes are deleted). Use `UpdateObjectMeta` for any
+change that must keep the body or the ratings (NEX `ChangeMeta`, `UpdateObjectMetaBinary`,
+`UpdateObjectPeriod`, `UpdateObjectDataType`); use `PutObject` only to write a new body.
 
 ### Searching objects (`ListObjects`)
 
@@ -186,9 +215,10 @@ native ids per network.
 ## Errors
 
 `InvalidArgument` (bad owner, slot, op, JSON, digest, overflow, a rating out of range or on a slot
-that does not exist), `ResourceExhausted` (too large, quota), `PermissionDenied` (writer,
+that does not exist, an empty metadata update), `ResourceExhausted` (too large, quota), `PermissionDenied` (writer,
 self-rating), `FailedPrecondition` (a per-network title without a network, a
-title conflict, no blob tier, an uploaded body that does not match), `NotFound` (unknown neutral
+title conflict, no blob tier, an uploaded body that does not match, a rename while an upload is
+pending), `AlreadyExists` (a rename or move onto a taken name), `NotFound` (unknown neutral
 key, unknown or expired upload), `Unavailable` (the account core or the bucket did not answer),
 `Unauthenticated`.
 

@@ -84,6 +84,13 @@ Reference adapters: `np-tus` (variables and slots) and `np-uploader` (attachment
   `ListObjects` (one call, no extra hop); `GetRatingWithLog`'s log is the rater's row
   (`rated`, `rater_value`, `lock_expires_unix_ms`). `ResetRating(s)` is `ResetRatings`.
   Custom rankings stay a leaderboards concern.
+* Metadata changes (v0.7.0): `ChangeMeta` / `UpdateObjectMetaBinary` / `UpdateObjectPeriod` /
+  `UpdateObjectDataType` (and their `...WithPassword` forms) are `UpdateObjectMeta(id, writer,
+  ...)`: meta binary = `info`, tags / period / flags = `meta_merge_json` (or `meta_json` for the
+  whole map), data type = `collection`, permission = `visibility` + `recipients`, period expiry =
+  `expires_unix_ms`. It keeps the uploaded body and the ratings; never use `PutObject` for these,
+  it replaces the body and drops an uploaded blob. `condition.expect_updated_unix_ms` with the
+  `updated_unix_ms` you read guards a read-modify-write.
 * SMM2 courses: a course is a public object (`collection "courses"`); the 36-bit data id and
   checksum are derived from `id`, which is stable. Thumbnails/replays are separate objects named
   `<id>.thumb`/`<id>.replay` or share a meta key.

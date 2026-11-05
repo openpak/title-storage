@@ -19,26 +19,27 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	TitleStorage_SetVariables_FullMethodName    = "/openpak.titlestorage.v1.TitleStorage/SetVariables"
-	TitleStorage_ListVariables_FullMethodName   = "/openpak.titlestorage.v1.TitleStorage/ListVariables"
-	TitleStorage_AddVariable_FullMethodName     = "/openpak.titlestorage.v1.TitleStorage/AddVariable"
-	TitleStorage_TrySetVariable_FullMethodName  = "/openpak.titlestorage.v1.TitleStorage/TrySetVariable"
-	TitleStorage_DeleteVariables_FullMethodName = "/openpak.titlestorage.v1.TitleStorage/DeleteVariables"
-	TitleStorage_PutObject_FullMethodName       = "/openpak.titlestorage.v1.TitleStorage/PutObject"
-	TitleStorage_GetObject_FullMethodName       = "/openpak.titlestorage.v1.TitleStorage/GetObject"
-	TitleStorage_GetObjectByID_FullMethodName   = "/openpak.titlestorage.v1.TitleStorage/GetObjectByID"
-	TitleStorage_ListObjects_FullMethodName     = "/openpak.titlestorage.v1.TitleStorage/ListObjects"
-	TitleStorage_DeleteObjects_FullMethodName   = "/openpak.titlestorage.v1.TitleStorage/DeleteObjects"
-	TitleStorage_PrepareUpload_FullMethodName   = "/openpak.titlestorage.v1.TitleStorage/PrepareUpload"
-	TitleStorage_CompleteUpload_FullMethodName  = "/openpak.titlestorage.v1.TitleStorage/CompleteUpload"
-	TitleStorage_InitRating_FullMethodName      = "/openpak.titlestorage.v1.TitleStorage/InitRating"
-	TitleStorage_RateObject_FullMethodName      = "/openpak.titlestorage.v1.TitleStorage/RateObject"
-	TitleStorage_GetRatings_FullMethodName      = "/openpak.titlestorage.v1.TitleStorage/GetRatings"
-	TitleStorage_ResetRatings_FullMethodName    = "/openpak.titlestorage.v1.TitleStorage/ResetRatings"
-	TitleStorage_Usage_FullMethodName           = "/openpak.titlestorage.v1.TitleStorage/Usage"
-	TitleStorage_MapTitle_FullMethodName        = "/openpak.titlestorage.v1.TitleStorage/MapTitle"
-	TitleStorage_UpsertTitle_FullMethodName     = "/openpak.titlestorage.v1.TitleStorage/UpsertTitle"
-	TitleStorage_ListTitles_FullMethodName      = "/openpak.titlestorage.v1.TitleStorage/ListTitles"
+	TitleStorage_SetVariables_FullMethodName     = "/openpak.titlestorage.v1.TitleStorage/SetVariables"
+	TitleStorage_ListVariables_FullMethodName    = "/openpak.titlestorage.v1.TitleStorage/ListVariables"
+	TitleStorage_AddVariable_FullMethodName      = "/openpak.titlestorage.v1.TitleStorage/AddVariable"
+	TitleStorage_TrySetVariable_FullMethodName   = "/openpak.titlestorage.v1.TitleStorage/TrySetVariable"
+	TitleStorage_DeleteVariables_FullMethodName  = "/openpak.titlestorage.v1.TitleStorage/DeleteVariables"
+	TitleStorage_PutObject_FullMethodName        = "/openpak.titlestorage.v1.TitleStorage/PutObject"
+	TitleStorage_GetObject_FullMethodName        = "/openpak.titlestorage.v1.TitleStorage/GetObject"
+	TitleStorage_GetObjectByID_FullMethodName    = "/openpak.titlestorage.v1.TitleStorage/GetObjectByID"
+	TitleStorage_ListObjects_FullMethodName      = "/openpak.titlestorage.v1.TitleStorage/ListObjects"
+	TitleStorage_DeleteObjects_FullMethodName    = "/openpak.titlestorage.v1.TitleStorage/DeleteObjects"
+	TitleStorage_UpdateObjectMeta_FullMethodName = "/openpak.titlestorage.v1.TitleStorage/UpdateObjectMeta"
+	TitleStorage_PrepareUpload_FullMethodName    = "/openpak.titlestorage.v1.TitleStorage/PrepareUpload"
+	TitleStorage_CompleteUpload_FullMethodName   = "/openpak.titlestorage.v1.TitleStorage/CompleteUpload"
+	TitleStorage_InitRating_FullMethodName       = "/openpak.titlestorage.v1.TitleStorage/InitRating"
+	TitleStorage_RateObject_FullMethodName       = "/openpak.titlestorage.v1.TitleStorage/RateObject"
+	TitleStorage_GetRatings_FullMethodName       = "/openpak.titlestorage.v1.TitleStorage/GetRatings"
+	TitleStorage_ResetRatings_FullMethodName     = "/openpak.titlestorage.v1.TitleStorage/ResetRatings"
+	TitleStorage_Usage_FullMethodName            = "/openpak.titlestorage.v1.TitleStorage/Usage"
+	TitleStorage_MapTitle_FullMethodName         = "/openpak.titlestorage.v1.TitleStorage/MapTitle"
+	TitleStorage_UpsertTitle_FullMethodName      = "/openpak.titlestorage.v1.TitleStorage/UpsertTitle"
+	TitleStorage_ListTitles_FullMethodName       = "/openpak.titlestorage.v1.TitleStorage/ListTitles"
 )
 
 // TitleStorageClient is the client API for TitleStorage service.
@@ -83,6 +84,11 @@ type TitleStorageClient interface {
 	GetObjectByID(ctx context.Context, in *GetObjectByIDRequest, opts ...grpc.CallOption) (*ObjectResponse, error)
 	ListObjects(ctx context.Context, in *ListObjectsRequest, opts ...grpc.CallOption) (*ListObjectsResponse, error)
 	DeleteObjects(ctx context.Context, in *DeleteObjectsRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
+	// UpdateObjectMeta (v0.7.0) changes an object's metadata only: info, meta_json (replace and/or
+	// merge), name, collection, visibility and recipients, expiry, setter. It never touches the body
+	// (inline or blob), the size, the id or the ratings. PutObject is the other way round: it
+	// replaces the whole object, and over a blob-backed object it drops the blob.
+	UpdateObjectMeta(ctx context.Context, in *UpdateObjectMetaRequest, opts ...grpc.CallOption) (*ObjectResponse, error)
 	// Blob tier: a body that should not travel inline (a video, a course with replays) goes to S3
 	// directly from the console. PrepareUpload checks the quota and the size cap, reserves the
 	// object id and returns a short-lived presigned request; the console sends the bytes; the
@@ -217,6 +223,16 @@ func (c *titleStorageClient) DeleteObjects(ctx context.Context, in *DeleteObject
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(DeleteResponse)
 	err := c.cc.Invoke(ctx, TitleStorage_DeleteObjects_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *titleStorageClient) UpdateObjectMeta(ctx context.Context, in *UpdateObjectMetaRequest, opts ...grpc.CallOption) (*ObjectResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ObjectResponse)
+	err := c.cc.Invoke(ctx, TitleStorage_UpdateObjectMeta_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -365,6 +381,11 @@ type TitleStorageServer interface {
 	GetObjectByID(context.Context, *GetObjectByIDRequest) (*ObjectResponse, error)
 	ListObjects(context.Context, *ListObjectsRequest) (*ListObjectsResponse, error)
 	DeleteObjects(context.Context, *DeleteObjectsRequest) (*DeleteResponse, error)
+	// UpdateObjectMeta (v0.7.0) changes an object's metadata only: info, meta_json (replace and/or
+	// merge), name, collection, visibility and recipients, expiry, setter. It never touches the body
+	// (inline or blob), the size, the id or the ratings. PutObject is the other way round: it
+	// replaces the whole object, and over a blob-backed object it drops the blob.
+	UpdateObjectMeta(context.Context, *UpdateObjectMetaRequest) (*ObjectResponse, error)
 	// Blob tier: a body that should not travel inline (a video, a course with replays) goes to S3
 	// directly from the console. PrepareUpload checks the quota and the size cap, reserves the
 	// object id and returns a short-lived presigned request; the console sends the bytes; the
@@ -434,6 +455,9 @@ func (UnimplementedTitleStorageServer) ListObjects(context.Context, *ListObjects
 }
 func (UnimplementedTitleStorageServer) DeleteObjects(context.Context, *DeleteObjectsRequest) (*DeleteResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteObjects not implemented")
+}
+func (UnimplementedTitleStorageServer) UpdateObjectMeta(context.Context, *UpdateObjectMetaRequest) (*ObjectResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateObjectMeta not implemented")
 }
 func (UnimplementedTitleStorageServer) PrepareUpload(context.Context, *PrepareUploadRequest) (*PrepareUploadResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PrepareUpload not implemented")
@@ -666,6 +690,24 @@ func _TitleStorage_DeleteObjects_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TitleStorage_UpdateObjectMeta_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateObjectMetaRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TitleStorageServer).UpdateObjectMeta(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TitleStorage_UpdateObjectMeta_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TitleStorageServer).UpdateObjectMeta(ctx, req.(*UpdateObjectMetaRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _TitleStorage_PrepareUpload_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(PrepareUploadRequest)
 	if err := dec(in); err != nil {
@@ -892,6 +934,10 @@ var TitleStorage_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteObjects",
 			Handler:    _TitleStorage_DeleteObjects_Handler,
+		},
+		{
+			MethodName: "UpdateObjectMeta",
+			Handler:    _TitleStorage_UpdateObjectMeta_Handler,
 		},
 		{
 			MethodName: "PrepareUpload",

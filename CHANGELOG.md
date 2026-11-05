@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.7.0 — 2026-11-05
+
+- `UpdateObjectMeta` (board openpak/prds#146, gap D5 of nex `docs/core-backed-storage.md`): a
+  metadata-only update by object id. It changes `info`, `meta_json` (replace) and/or
+  `meta_merge_json` (top-level merge), `name`, `collection` (move), `visibility` with `recipients`,
+  `expires_unix_ms` and `setter`, only the fields set, and never the body (inline or blob), size,
+  digest, id, created time or ratings. Optional version check with `condition`
+  (`expect_updated_unix_ms` / `expect_setter`). Renames onto a taken name are `AlreadyExists`;
+  renames while an upload for the object is pending are `FailedPrecondition`.
+- `PutObject` is unchanged: it replaces the whole object and, over a blob-backed object, still drops
+  the blob. The protocol doc describes the difference.
+- No schema change.
+
 ## v0.6.0 — 2026-11-05
 
 - Recipients (board openpak/prds#135, gap D2 of nex `docs/core-backed-storage.md`): visibility

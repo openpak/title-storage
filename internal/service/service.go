@@ -770,6 +770,79 @@ func (s *Service) ListObjects(ctx context.Context, r Ref, q ObjQuery) ([]store.O
 	return os, hits, err
 }
 
+// MetaChange is UpdateObjectMeta's request: nil / zero fields keep the stored value.
+type MetaChange struct {
+	Writer, Setter    string
+	Info              *[]byte
+	Meta              *string
+	MetaMerge         string
+	Name, Collection  *string
+	Vis               string
+	Recipients        []string
+	RecipientsFriends bool
+	Expires           *int64 // Unix ms; 0 = never
+	Cond              Condition
+}
+
+// UpdateObjectMeta changes an object's metadata only; the body (inline or blob), the size and the
+// ratings stay. found=false: no such object for this network. The writer follows the write rule
+// for the object's owner.
+func (s *Service) UpdateObjectMeta(ctx context.Context, network string, id int64, c MetaChange) (o store.Object, found, condFailed bool, err error) {
+	if c.Info == nil && c.Meta == nil && c.MetaMerge == "" && c.Name == nil && c.Collection == nil && c.Vis == "" &&
+		len(c.Recipients) == 0 && !c.RecipientsFriends && c.Expires == nil && c.Setter == "" {
+		return o, false, false, ErrBadRequest
+	}
+	if validObjVis(c.Vis) != nil || (c.Meta != nil && (*c.Meta == "" || !store.ValidJSONObject(*c.Meta))) ||
+		!store.ValidJSONObject(c.MetaMerge) || (c.Name != nil && (*c.Name == "" || len(*c.Name) > MaxName)) ||
+		(c.Collection != nil && !collRE.MatchString(*c.Collection)) {
+		return o, false, false, ErrBadRequest
+	}
+	// A recipient list only travels with a visibility (as PutObject stores it).
+	if c.Vis == "" && (len(c.Recipients) > 0 || c.RecipientsFriends) {
+		return o, false, false, ErrBadRequest
+	}
+	if (c.Info != nil && len(*c.Info) > MaxInfo) || (c.Meta != nil && len(*c.Meta) > MaxMeta) || len(c.MetaMerge) > MaxMeta {
+		return o, false, false, ErrTooLarge
+	}
+	recips, err := cleanRecipients(c.Recipients)
+	if err != nil {
+		return o, false, false, err
+	}
+	if err := validAccount(c.Writer); err != nil {
+		return o, false, false, err
+	}
+	u := store.MetaUpdate{ID: id, Setter: c.Setter, Info: c.Info, Meta: c.Meta, MetaMerge: c.MetaMerge, MaxMeta: MaxMeta,
+		Name: c.Name, Collection: c.Collection, Vis: c.Vis, Recipients: recips, RecipFrnds: c.RecipientsFriends}
+	if c.Expires != nil {
+		u.SetExpiry = true
+		if *c.Expires != 0 {
+			t := time.UnixMilli(*c.Expires).UTC()
+			if !t.After(time.Now()) {
+				return o, false, false, ErrBadRequest
+			}
+			u.Expires = &t
+		}
+	}
+	cur, err := s.object(ctx, network, id)
+	if err != nil || cur == nil {
+		return o, false, false, err
+	}
+	if err := s.authorizeWrite(ctx, c.Writer, cur.Owner); err != nil {
+		return o, false, false, err
+	}
+	if !c.Cond.none() {
+		u.Cond = func(cur *store.Object) bool { return c.Cond.holds(&cur.Updated, cur.Setter) }
+	}
+	o, found, condFailed, err = s.Store.UpdateObjectMeta(ctx, u)
+	if errors.Is(err, store.ErrMetaTooLarge) {
+		err = ErrTooLarge
+	}
+	if err != nil || !found || condFailed {
+		return store.Object{}, found, condFailed, err
+	}
+	return o, true, false, s.withURL(ctx, &o)
+}
+
 func (s *Service) DeleteObjects(ctx context.Context, r Ref, owner, writer, collection string, names []string) (int64, error) {
 	if err := s.authorizeWrite(ctx, writer, owner); err != nil {
 		return 0, err
