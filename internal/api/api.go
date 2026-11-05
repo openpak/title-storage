@@ -3,8 +3,10 @@
 //
 //	GET    /healthz                                  200 when the database answers
 //	DELETE /internal/accounts/{account}/data         account erasure: every variable, object and pending upload the
-//	                                                 account owns, and their blobs in the bucket
-//	                                                 (X-Internal-Key) -> {"deleted":rows,"blobs":n}
+//	                                                 account owns, and their blobs in the bucket; the ratings it made
+//	                                                 (taken out of the totals) and the ratings on its objects
+//	                                                 (X-Internal-Key) -> {"deleted":rows,"blobs":n,
+//	                                                 "ratings_made":n,"ratings_received":n}
 package api
 
 import (
@@ -51,15 +53,17 @@ func jsonOut(w http.ResponseWriter, code int, v any) {
 
 // erase is the account-erasure finaliser's call once the deletion grace period is over; a repeat is a 200.
 func (s *Server) erase(w http.ResponseWriter, r *http.Request) {
-	n, b, err := s.Svc.EraseAccount(r.Context(), r.PathValue("account"))
+	e, b, err := s.Svc.EraseAccount(r.Context(), r.PathValue("account"))
+	out := map[string]any{"deleted": e.Rows, "blobs": b, "ratings_made": e.RatingsMade, "ratings_received": e.RatingsReceived}
 	switch {
 	case errors.Is(err, service.ErrBadAccount):
 		jsonOut(w, http.StatusBadRequest, map[string]any{"error": "account ids are UUIDs"})
 	case err != nil:
 		// Blobs not yet deleted stay in the trash under the account: the finaliser's repeat finishes them.
 		log.Printf("title-storage: erase: %v", err)
-		jsonOut(w, http.StatusBadGateway, map[string]any{"error": "title storage error", "deleted": n, "blobs": b})
+		out["error"] = "title storage error"
+		jsonOut(w, http.StatusBadGateway, out)
 	default:
-		jsonOut(w, 200, map[string]any{"deleted": n, "blobs": b})
+		jsonOut(w, 200, out)
 	}
 }

@@ -32,11 +32,19 @@ func TestParseMetaRange(t *testing.T) {
 
 func TestObjSort(t *testing.T) {
 	for _, s := range []string{"", "updated", "created", "size", "name", "id"} {
-		if objSort(s) != nil {
-			t.Errorf("%q refused", s)
+		if sl, _, err := objSort(s); err != nil || sl != nil {
+			t.Errorf("%q: %v %v", s, sl, err)
 		}
 	}
-	if !errors.Is(objSort("rating:0"), ErrNoRatings) || !errors.Is(objSort("bogus"), ErrBadRequest) {
-		t.Error("rating / bogus sort")
+	if sl, avg, err := objSort("rating:3"); err != nil || sl == nil || *sl != 3 || avg {
+		t.Errorf("rating:3: %v %v %v", sl, avg, err)
+	}
+	if sl, avg, err := objSort("rating_avg:255"); err != nil || sl == nil || *sl != 255 || !avg {
+		t.Errorf("rating_avg:255: %v %v %v", sl, avg, err)
+	}
+	for _, bad := range []string{"bogus", "rating:", "rating:-1", "rating:256", "rating:1x", "rating_avg:99999999999"} {
+		if _, _, err := objSort(bad); !errors.Is(err, ErrBadRequest) {
+			t.Errorf("%q: %v", bad, err)
+		}
 	}
 }

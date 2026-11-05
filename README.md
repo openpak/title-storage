@@ -33,6 +33,10 @@ OpenPak's neutral per-title, per-account storage.
   (`PrepareUpload` -> PUT or POST form -> `CompleteUpload`; reads carry a presigned `get_url`).
   Quota and size cap are checked before the upload, size and digest after it; deletes, expiry,
   abandoned uploads and account erasure delete the bytes. Small objects stay inline.
+* **Ratings**: numeric slots per object (`InitRating`, `RateObject`, `GetRatings`,
+  `ResetRatings`) with an initial value, range, lock (none, interval, period, permanent) and
+  flags; one row per rater, so a lock holds and an erased rater's ratings come back out of the
+  totals. Searches sort by a slot's total or average.
 * **Quota** per owner per title: bytes, objects and the largest body, with service defaults
   and per-title overrides (`UpsertTitle`).
 * **Cross-network by default**; a title with `cross_network=false` keeps each network's rows apart.

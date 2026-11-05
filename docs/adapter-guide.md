@@ -41,9 +41,9 @@ Reference adapters: `np-tus` (variables and slots) and `np-uploader` (attachment
   `wfc` link.
 * Visibility `public` for browsable tables (ghosts, friend info readable by anyone with the id),
   `private` for per-player GameStats; the Mii filtering for non-owners stays in `wfc-sake`.
-* Gaps: range/ordering filters beyond equality (the "nearest slower ghost" query) are not
-  expressible yet. Add a `meta` index or a numeric sort key before moving MKW ghosts here, or keep
-  the ghost *query* adapter-side over `ListObjects` until then.
+* Gaps: numeric ranges on metadata exist (`meta_range_json`, v0.4.0), but there is no sort by a
+  metadata key, so the "nearest slower ghost" query is a range plus an adapter-side pick, or a
+  numeric sort key added here before moving MKW ghosts.
 
 ### NEX DataStore (Wii U/3DS `nex`, Switch `switch-nex`)
 
@@ -57,16 +57,28 @@ Reference adapters: `np-tus` (variables and slots) and `np-uploader` (attachment
 * Search (`DataStoreSearchParam`): `ListObjects` with `all_owners` / `friends_of_viewer` /
   `owners` (+ `exclude_owners`), `collections`, `meta_filter_json` (tags), `meta_range_json`
   (numeric ranges such as `data_type`), the created/updated bounds and `sort`; mapping table in
-  [protocol.md](protocol.md#searching-objects-listobjects).
-  `expires` is `ttl_seconds`.
+  [protocol.md](protocol.md#searching-objects-listobjects). A rating order
+  (`ResultOrderColumn` 64-79 / 96-111) is `sort "rating:<slot>"` / `"rating_avg:<slot>"`,
+  `MinimalRatingFrequency` is `min_rating_count`. The object's `period` (expiry) is `ttl_seconds`.
 * Upload (`PreparePostObject` / `CompletePostObject`): `PrepareUpload(..., size, post_form=true)`;
   the `id` is the data id, `put_url` + `form_fields` are the `DataStoreReqPostInfo` URL and form
   fields (no request headers). `CompletePostObject(success)` is `CompleteUpload(id)`; a
   `FailedPrecondition` there is the console's upload not matching (`DataStore::OperationNotAllowed`
   or the title's equivalent). `GetObjectInfos`/`PrepareGetObject` answer with `get_url`.
-* Gaps: ratings (`DataStoreRatingInfo`) and custom rankings are not a core concept yet. Keep rating
-  counters in `meta_json` via `PutObject` with a `Condition` until a `ratings` table exists in this
-  service (planned as a sibling of `objects`, keyed by object id).
+* Ratings (v0.5.0): `InitializeObjectRatingWithSlot` / the rating params of `PostObject` are
+  `InitRating(id, writer, slot, policy)`: `initial_value`, `lock` from `RatingLockType`
+  (0 none, 1 `interval` with `interval_seconds` = `PeriodDuration`, 2 `period` with `period_day` =
+  `PeriodDuration` (-17, -1..-7) and `period_hour` = `PeriodHour`, 3 `permanent`), `range_min` /
+  `range_max` only when `InternalFlag` has UseRangeMin (0x2) / UseRangeMax (0x4), `Flag` 0x4
+  `modifiable`, 0x8 `round_minus`, 0x10 `disable_self_rating`. `RateObject(s)` is
+  `RateObject(id, slot, rater = the caller's account, value)`; `locked=true` is
+  `DataStore::OperationNotAllowed`, `PermissionDenied` (self-rating) likewise, `InvalidArgument`
+  (range, no slot) is `DataStore::InvalidArgument`. `DataStoreRatingInfo{TotalValue, Count,
+  InitialValue}` is `Rating{total, count, initial_value}`; `GetRating(s)` and the ratings in
+  `GetMeta`/search results are `GetRatings` or `include_ratings` on `GetObjectByID` /
+  `ListObjects` (one call, no extra hop); `GetRatingWithLog`'s log is the rater's row
+  (`rated`, `rater_value`, `lock_expires_unix_ms`). `ResetRating(s)` is `ResetRatings`.
+  Custom rankings stay a leaderboards concern.
 * SMM2 courses: a course is a public object (`collection "courses"`); the 36-bit data id and
   checksum are derived from `id`, which is stable. Thumbnails/replays are separate objects named
   `<id>.thumb`/`<id>.replay` or share a meta key.

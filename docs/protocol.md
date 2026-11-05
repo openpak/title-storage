@@ -75,7 +75,9 @@ Every filter is optional and they combine with AND; `hits` is the size of the wh
 | `meta_filter_json` | metadata contains this JSON (jsonb `@>`): equality on keys, membership in arrays (`{"tags":["kart"]}`) |
 | `meta_range_json` | inclusive numeric ranges on top-level metadata keys: `{"data_type":{"ge":1,"le":5},"plays":{"ge":10}}`. Only `ge` and `le`; a key with `{}` only requires a number. An object whose key is missing or not a JSON number does not match. Bounds compare as exact decimals (int64 values are safe). At most 8 keys, keys `[A-Za-z0-9_.-]{1,64}`; key and bounds are bound parameters, never SQL text |
 | `created_after_ms`, `created_before_ms`, `updated_after_ms`, `updated_before_ms` | inclusive Unix-ms bounds; 0 = unbounded |
-| `sort` | `updated` (default), `created`, `size`, `name`, `id`, newest/largest first unless `ascending`; ties by id. `rating:<slot>` / `rating_avg:<slot>` are the ratings tier's (v0.5.0) and are `InvalidArgument` before it |
+| `sort` | `updated` (default), `created`, `size`, `name`, `id`, newest/largest first unless `ascending`; ties by id. `rating:<slot>` sorts by that rating slot's total, `rating_avg:<slot>` by its average (`(total - initial_value) / count`); objects without the slot (or, for the average, without ratings) come last in both directions (v0.5.0) |
+| `min_rating_count` | with a rating sort: only objects whose sorted slot has at least this many ratings (NEX `MinimalRatingFrequency`) |
+| `include_ratings` | every result carries its rating slots (`Object.ratings`), as `GetObjectByID` can |
 
 Mapping from NEX `DataStoreSearchParam`: `OwnerType` anybody / friends / anybody-except =
 `all_owners` / `friends_of_viewer` / `all_owners` + `exclude_owners`; `OwnerIDs` = `owners`;
@@ -83,6 +85,37 @@ Mapping from NEX `DataStoreSearchParam`: `OwnerType` anybody / friends / anybody
 `CreatedAfter/Before`, `UpdatedAfter/Before` = the time bounds; `Tags` = `meta_filter_json`
 `{"tags":[...]}`; `ResultOrderColumn`/`ResultOrder` = `sort`/`ascending`; `ResultRange` =
 `offset`/`limit`.
+
+## Ratings
+
+Numeric rating slots on an object (NEX DataStore ratings, stars, likes), 0-255 per object. A slot
+holds its policy, a running `total` (starting at `initial_value`) and a `count`; each rater has
+one row per (object, slot) with what it contributed (`rater_value`, `rater_count`) and when it last
+rated.
+
+| Call | Meaning |
+| --- | --- |
+| `InitRating(network, id, writer, slot, policy)` | creates the slot; one that exists is returned as it is (the first policy wins). The writer follows the write rule for the object's owner. `found=false`: no such object |
+| `RateObject(network, id, slot, rater, value, policy)` | the rater (an account id, never a virtual owner) must be able to read the object (`found=false` otherwise, as a get). A missing slot is created with `policy`; without one it is `InvalidArgument`. Answers the slot after the call with the rater's row |
+| `GetRatings(network, viewer, ids[], slots[], rater)` | the slots of the objects the viewer can read (max 1000 ids; empty `slots` = all), by id then slot; with `rater`, that account's row and lock |
+| `ResetRatings(network, id, writer, slots[])` | slots back to `initial_value`, count 0, every rater's row deleted; answers the rows deleted |
+
+`RatingPolicy`:
+
+| Field | Meaning |
+| --- | --- |
+| `initial_value` | where `total` starts |
+| `lock` | `none` (default): any number of ratings; `interval`: one per `interval_seconds`; `period`: one until the next boundary, `period_hour` (0-23 UTC) on `period_day` (-17 = the 1st of the next month, -1..-7 = the next Monday..Sunday after the rating day, never that day itself); `permanent`: one per rater, ever |
+| `range_min`, `range_max` | set = enforced: a value outside is `InvalidArgument` |
+| `round_minus` | a negative value counts as 0 (before the range check) |
+| `modifiable` | a rater's repeat replaces its value (the total moves by the difference, the count stays) instead of adding a rating |
+| `disable_self_rating` | the object's owner rating it is `PermissionDenied` |
+
+A locked rater is not an error: `locked=true`, nothing changed, and `lock_expires_unix_ms` says
+until when (-1 = never). One `RateObject` is one transaction under the slot's row lock, so
+concurrent ratings add up exactly; an int64 overflow is `InvalidArgument`. Deleting, replacing by
+a new id, or expiring an object deletes its slots and every rating on them (foreign keys,
+`ON DELETE CASCADE`); a replacement that keeps the id keeps its ratings.
 
 ## Blob tier (large bodies)
 
@@ -128,8 +161,9 @@ native ids per network.
 
 ## Errors
 
-`InvalidArgument` (bad owner, slot, op, JSON, digest, overflow), `ResourceExhausted` (too large,
-quota), `PermissionDenied` (writer), `FailedPrecondition` (a per-network title without a network, a
+`InvalidArgument` (bad owner, slot, op, JSON, digest, overflow, a rating out of range or on a slot
+that does not exist), `ResourceExhausted` (too large, quota), `PermissionDenied` (writer,
+self-rating), `FailedPrecondition` (a per-network title without a network, a
 title conflict, no blob tier, an uploaded body that does not match), `NotFound` (unknown neutral
 key, unknown or expired upload), `Unavailable` (the account core or the bucket did not answer),
 `Unauthenticated`.
@@ -140,8 +174,10 @@ None. Storage writes are not announced on the account core's event stream: no co
 slot or an upload as an event (the website has no storage view, and rewards count scores and
 trophies, which have their own cores). If a consumer appears, `object.put` / `object.delete` with
 `subject_id = <title>/<collection>/<name>` is where it would go. Account erasure deletes every
-variable, object and pending upload the account owns and their blobs in the bucket, and answers
-`{"deleted": rows, "blobs": n}`; when the bucket fails it answers 502 and the finaliser's repeat
+variable, object and pending upload the account owns and their blobs in the bucket, every rating
+the account made (its contribution is subtracted from each slot's total and count, in one
+transaction under the slots' locks) and every rating others made on its objects (they go with the
+objects), and answers `{"deleted": rows, "blobs": n, "ratings_made": n, "ratings_received": n}`; when the bucket fails it answers 502 and the finaliser's repeat
 deletes the rest (the trash remembers the keys under the account). The `setter` strings other
 owners' rows carry for a writer are adapter-opaque and stay.
 
@@ -151,7 +187,9 @@ Postgres `title_storage`: `titles` (policy), `title_keys`, `variables` (primary 
 `(title_key, ns, owner, slot)`), `objects` (unique `(title_key, ns, owner, collection, name)`, a
 global `id`, `meta jsonb`, `body bytea`, `blob_key`/`sha256` for a blob-backed body), `uploads`
 (prepared uploads, the reserved id, `expires_at`), `blob_trash` (bucket keys still to delete).
-Search indexes: `objects_list (title_key, collection, updated)` and `objects_created (title_key,
+`rating_slots` (primary key `(object_id, slot)`, policy, `total`, `rating_count`; foreign key to
+`objects(id)` on delete cascade) and `ratings` (primary key `(object_id, slot, rater)`, `value`,
+`times`, `rated`; cascade from its slot; index on `rater` for erasure). Search indexes: `objects_list (title_key, collection, updated)` and `objects_created (title_key,
 collection, created)`; metadata ranges and containment filter within those (no per-key index:
 title sizes do not need one yet).
 `ns` is empty on a cross-network title and the network on

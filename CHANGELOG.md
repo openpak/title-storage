@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.5.0 — 2026-11-05
+
+- Ratings (board openpak/prds#137, gap D4 of nex `docs/core-backed-storage.md`): `InitRating`,
+  `RateObject`, `GetRatings`, `ResetRatings`. A slot (0-255) per object holds a `RatingPolicy`
+  (initial value, inclusive range, lock `none` / `interval` / `period` / `permanent`, modifiable,
+  round-minus, no self-rating), a running total and a count; one row per (object, slot, rater)
+  account holds the rater's contribution and last rating time. A locked rater gets `locked=true`
+  and the lock's expiry. Objects deleted (or expired) take their ratings with them.
+- `ListObjects`: `sort "rating:<slot>"` / `"rating_avg:<slot>"` (slot-less objects last),
+  `min_rating_count`, `include_ratings`; `GetObjectByID`: `include_ratings`.
+- Account erasure also deletes the ratings the account made (subtracting them from each slot's
+  total and count) and the ratings others made on its objects; the answer adds
+  `"ratings_made"` and `"ratings_received"`.
+- Schema: `rating_slots`, `ratings` (additive, migrated at start).
+
 ## v0.4.0 — 2026-11-05
 
 - Search (board openpak/prds#136, gap D3 of nex `docs/core-backed-storage.md`): `ListObjects`

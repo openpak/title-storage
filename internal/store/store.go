@@ -99,9 +99,10 @@ type Object struct {
 	Created    time.Time
 	Updated    time.Time
 	Expires    *time.Time
-	BlobKey    string // non-empty: the body lives in the blob tier under this key, Body is empty
-	SHA256     string // the blob's digest when the uploader gave one
-	GetURL     string // not stored: the presigned GET the service adds to a blob-backed object
+	BlobKey    string   // non-empty: the body lives in the blob tier under this key, Body is empty
+	SHA256     string   // the blob's digest when the uploader gave one
+	GetURL     string   // not stored: the presigned GET the service adds to a blob-backed object
+	Ratings    []Rating // not stored here: the rating slots, when the caller asks for them
 }
 
 // Reader is who is asking: the viewer's account (empty = anonymous) and, when the query can
@@ -201,6 +202,37 @@ CREATE INDEX IF NOT EXISTS blob_trash_owner ON blob_trash (owner);
 
 -- Search (v0.4.0): created-time ranges and sorts.
 CREATE INDEX IF NOT EXISTS objects_created ON objects (title_key, collection, created);
+
+-- Ratings (v0.5.0): a slot per (object, slot) with its policy and running total, one row per
+-- rater holding what that rater contributed. Both go with the object.
+CREATE TABLE IF NOT EXISTS rating_slots (
+    object_id        BIGINT NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
+    slot             INTEGER NOT NULL CHECK (slot BETWEEN 0 AND 255),
+    total            BIGINT NOT NULL,
+    rating_count     BIGINT NOT NULL DEFAULT 0,
+    initial_value    BIGINT NOT NULL DEFAULT 0,
+    lock_policy      TEXT NOT NULL DEFAULT 'none' CHECK (lock_policy IN ('none','interval','period','permanent')),
+    interval_seconds INTEGER NOT NULL DEFAULT 0,
+    period_day       INTEGER NOT NULL DEFAULT 0,
+    period_hour      INTEGER NOT NULL DEFAULT 0,
+    range_min        BIGINT,
+    range_max        BIGINT,
+    modifiable       BOOLEAN NOT NULL DEFAULT FALSE,
+    round_minus      BOOLEAN NOT NULL DEFAULT FALSE,
+    no_self_rating   BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (object_id, slot)
+);
+CREATE TABLE IF NOT EXISTS ratings (
+    object_id BIGINT NOT NULL,
+    slot      INTEGER NOT NULL,
+    rater     TEXT NOT NULL,
+    value     BIGINT NOT NULL,
+    times     BIGINT NOT NULL,
+    rated     TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (object_id, slot, rater),
+    FOREIGN KEY (object_id, slot) REFERENCES rating_slots (object_id, slot) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ratings_rater ON ratings (rater);
 
 INSERT INTO titles (key, name) VALUES ('terraria', 'Terraria') ON CONFLICT DO NOTHING;
 INSERT INTO title_keys (network, native_id, title_key) VALUES ('np', 'NPWR04270_00', 'terraria') ON CONFLICT DO NOTHING;
@@ -849,6 +881,9 @@ type ObjQuery struct {
 	UpdatedAfter  *time.Time
 	UpdatedBefore *time.Time
 	Sort          string // updated | created | size | name | id
+	RatingSlot    *int32 // sort by this rating slot instead (objects without the slot last)
+	RatingAvg     bool   // by its average rating, (total - initial) / count, instead of its total
+	MinRatings    int64  // with RatingSlot: at least this many ratings
 	Ascending     bool
 	Offset        int
 	Limit         int
@@ -916,9 +951,20 @@ func (s *Store) ListObjects(ctx context.Context, q ObjQuery) ([]Object, int, err
 			where += ` AND ` + b.op + arg(*b.t)
 		}
 	}
+	from, order := `objects`, col+" "+orderDir(q.Ascending)
+	if q.RatingSlot != nil {
+		from = `objects LEFT JOIN rating_slots rs ON rs.object_id = objects.id AND rs.slot = ` + arg(*q.RatingSlot)
+		order = `rs.total ` + orderDir(q.Ascending) + ` NULLS LAST`
+		if q.RatingAvg {
+			order = `(rs.total - rs.initial_value)::float8 / NULLIF(rs.rating_count, 0) ` + orderDir(q.Ascending) + ` NULLS LAST`
+		}
+		if q.MinRatings > 0 {
+			where += ` AND rs.rating_count >= ` + arg(q.MinRatings)
+		}
+	}
 	lim, off := arg(q.Limit), arg(q.Offset)
-	rows, err := s.DB.Query(ctx, fmt.Sprintf(`SELECT %s%s, count(*) OVER() FROM objects WHERE %s ORDER BY %s %s, id LIMIT %s OFFSET %s`,
-		objCols, bodyCol(q.WithBody), where, col, orderDir(q.Ascending), lim, off), args...)
+	rows, err := s.DB.Query(ctx, fmt.Sprintf(`SELECT %s%s, count(*) OVER() FROM %s WHERE %s ORDER BY %s, id LIMIT %s OFFSET %s`,
+		objCols, bodyCol(q.WithBody), from, where, order, lim, off), args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -966,18 +1012,50 @@ func (s *Store) Expire(ctx context.Context) (int64, error) {
 	return n, err
 }
 
-// EraseAccount deletes everything an account owns, in every title: variables, objects and pending
-// uploads. Blobs go to the trash under the account (the caller empties it: DrainTrash).
-func (s *Store) EraseAccount(ctx context.Context, account string) (int64, error) {
-	var n int64
-	err := s.DB.QueryRow(ctx, `WITH v AS (DELETE FROM variables WHERE owner = $1 RETURNING 1),
+// Erased is what EraseAccount removed.
+type Erased struct {
+	Rows            int64 // variables, objects and pending uploads the account owned
+	RatingsMade     int64 // ratings the account gave (their values taken back out of the totals)
+	RatingsReceived int64 // other raters' ratings on the account's objects (gone with the objects)
+}
+
+// EraseAccount deletes everything an account owns, in every title: variables, objects (with
+// their rating slots and every rating on them) and pending uploads, and every rating the account
+// made on anyone's objects, subtracting it from those slots. Blobs go to the trash under the
+// account (the caller empties it: DrainTrash).
+func (s *Store) EraseAccount(ctx context.Context, account string) (Erased, error) {
+	var e Erased
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return e, err
+	}
+	defer tx.Rollback(ctx)
+	// Lock the slots it rated (in key order, as one RateObject locks one) so no rating lands
+	// between reading its contribution and taking it out.
+	if _, err = tx.Exec(ctx, `SELECT 1 FROM rating_slots s WHERE EXISTS (SELECT 1 FROM ratings r WHERE r.rater = $1 AND r.object_id = s.object_id AND r.slot = s.slot)
+		ORDER BY s.object_id, s.slot FOR UPDATE`, account); err != nil {
+		return e, err
+	}
+	if err = tx.QueryRow(ctx, `WITH d AS (DELETE FROM ratings WHERE rater = $1 RETURNING object_id, slot, value, times),
+		u AS (UPDATE rating_slots s SET total = s.total - d.value, rating_count = s.rating_count - d.times FROM d
+		  WHERE s.object_id = d.object_id AND s.slot = d.slot RETURNING 1)
+		SELECT count(*) FROM d`, account).Scan(&e.RatingsMade); err != nil {
+		return e, err
+	}
+	if err = tx.QueryRow(ctx, `WITH d AS (DELETE FROM ratings WHERE object_id IN (SELECT id FROM objects WHERE owner = $1) RETURNING 1)
+		SELECT count(*) FROM d`, account).Scan(&e.RatingsReceived); err != nil {
+		return e, err
+	}
+	if err = tx.QueryRow(ctx, `WITH v AS (DELETE FROM variables WHERE owner = $1 RETURNING 1),
 		o AS (DELETE FROM objects WHERE owner = $1 RETURNING owner, blob_key),
 		u AS (DELETE FROM uploads WHERE owner = $1 RETURNING owner, blob_key),
 		tr AS (INSERT INTO blob_trash (key, owner)
 		  SELECT blob_key, owner FROM o WHERE blob_key <> '' UNION ALL SELECT blob_key, owner FROM u
 		  ON CONFLICT DO NOTHING)
-		SELECT (SELECT count(*) FROM v) + (SELECT count(*) FROM o) + (SELECT count(*) FROM u)`, account).Scan(&n)
-	return n, err
+		SELECT (SELECT count(*) FROM v) + (SELECT count(*) FROM o) + (SELECT count(*) FROM u)`, account).Scan(&e.Rows); err != nil {
+		return e, err
+	}
+	return e, tx.Commit(ctx)
 }
 
 // ---- blob tier ----

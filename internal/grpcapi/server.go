@@ -99,7 +99,110 @@ func pbObj(o store.Object) *pb.Object {
 	if o.Expires != nil {
 		out.ExpiresUnixMs = o.Expires.UnixMilli()
 	}
+	for _, r := range o.Ratings {
+		out.Ratings = append(out.Ratings, pbRating(r, time.Time{}))
+	}
 	return out
+}
+
+func policyIn(p *pb.RatingPolicy) store.RatingPolicy {
+	out := store.RatingPolicy{Initial: p.GetInitialValue(), Lock: p.GetLock(), IntervalSeconds: int32(min(p.GetIntervalSeconds(), 1<<31-1)),
+		PeriodDay: p.GetPeriodDay(), PeriodHour: p.GetPeriodHour(), Modifiable: p.GetModifiable(), RoundMinus: p.GetRoundMinus(), NoSelf: p.GetDisableSelfRating()}
+	if p != nil && p.RangeMin != nil {
+		v := p.GetRangeMin()
+		out.Min = &v
+	}
+	if p != nil && p.RangeMax != nil {
+		v := p.GetRangeMax()
+		out.Max = &v
+	}
+	return out
+}
+
+func policyOut(p store.RatingPolicy) *pb.RatingPolicy {
+	return &pb.RatingPolicy{InitialValue: p.Initial, Lock: p.Lock, IntervalSeconds: uint32(max(p.IntervalSeconds, 0)), PeriodDay: p.PeriodDay,
+		PeriodHour: p.PeriodHour, RangeMin: p.Min, RangeMax: p.Max, Modifiable: p.Modifiable, RoundMinus: p.RoundMinus, DisableSelfRating: p.NoSelf}
+}
+
+// pbRating renders a slot; with now set, the rater's lock is worked out at that time.
+func pbRating(r store.Rating, now time.Time) *pb.Rating {
+	out := &pb.Rating{Id: uint64(r.ID), Slot: r.Slot, Total: r.Total, Count: uint32(r.Count), InitialValue: r.Policy.Initial, Policy: policyOut(r.Policy)}
+	if r.Rated {
+		out.Rated, out.RaterValue, out.RaterCount, out.RatedUnixMs = true, r.RaterValue, uint32(r.RaterCount), r.RatedAt.UnixMilli()
+		if !now.IsZero() {
+			switch until, forever := r.Lock(now); {
+			case forever:
+				out.LockExpiresUnixMs = -1
+			case !until.IsZero():
+				out.LockExpiresUnixMs = until.UnixMilli()
+			}
+		}
+	}
+	return out
+}
+
+func (s *Server) InitRating(ctx context.Context, req *pb.InitRatingRequest) (*pb.RatingResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	r, err := s.svc.InitRating(ctx, req.GetNetwork(), req.GetWriter(), int64(req.GetId()), req.GetSlot(), policyIn(req.GetPolicy()))
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if r == nil {
+		return &pb.RatingResponse{}, nil
+	}
+	return &pb.RatingResponse{Rating: pbRating(*r, store.Now()), Found: true}, nil
+}
+
+func (s *Server) RateObject(ctx context.Context, req *pb.RateObjectRequest) (*pb.RatingResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	var p *store.RatingPolicy
+	if req.GetPolicy() != nil {
+		v := policyIn(req.GetPolicy())
+		p = &v
+	}
+	r, found, locked, err := s.svc.RateObject(ctx, req.GetNetwork(), req.GetRater(), int64(req.GetId()), req.GetSlot(), req.GetValue(), p)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if !found {
+		return &pb.RatingResponse{}, nil
+	}
+	return &pb.RatingResponse{Rating: pbRating(r, store.Now()), Found: true, Locked: locked}, nil
+}
+
+func (s *Server) GetRatings(ctx context.Context, req *pb.GetRatingsRequest) (*pb.GetRatingsResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	ids := make([]int64, len(req.GetIds()))
+	for i, id := range req.GetIds() {
+		ids[i] = int64(id)
+	}
+	rs, err := s.svc.GetRatings(ctx, req.GetNetwork(), req.GetViewer(), ids, req.GetSlots(), req.GetRater())
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	out := &pb.GetRatingsResponse{}
+	now := store.Now()
+	for _, r := range rs {
+		out.Ratings = append(out.Ratings, pbRating(r, now))
+	}
+	return out, nil
+}
+
+func (s *Server) ResetRatings(ctx context.Context, req *pb.ResetRatingsRequest) (*pb.DeleteResponse, error) {
+	if err := s.authorize(ctx); err != nil {
+		return nil, err
+	}
+	n, _, err := s.svc.ResetRatings(ctx, req.GetNetwork(), req.GetWriter(), int64(req.GetId()), req.GetSlots())
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return &pb.DeleteResponse{Deleted: uint32(n)}, nil
 }
 
 func objResp(o *store.Object) *pb.ObjectResponse {
@@ -207,7 +310,7 @@ func (s *Server) GetObjectByID(ctx context.Context, req *pb.GetObjectByIDRequest
 	if err := s.authorize(ctx); err != nil {
 		return nil, err
 	}
-	o, err := s.svc.GetObjectByID(ctx, req.GetNetwork(), req.GetViewer(), int64(req.GetId()), req.GetIncludeBody())
+	o, err := s.svc.GetObjectByID(ctx, req.GetNetwork(), req.GetViewer(), int64(req.GetId()), req.GetIncludeBody(), req.GetIncludeRatings())
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -224,7 +327,7 @@ func (s *Server) ListObjects(ctx context.Context, req *pb.ListObjectsRequest) (*
 		AllOwners: req.GetAllOwners(), ExcludeOwners: req.GetExcludeOwners(), Collection: req.GetCollection(), Collections: req.GetCollections(),
 		Names: req.GetNames(), MetaFilter: req.GetMetaFilterJson(), MetaRange: req.GetMetaRangeJson(),
 		CreatedAfter: req.GetCreatedAfterMs(), CreatedBefore: req.GetCreatedBeforeMs(), UpdatedAfter: req.GetUpdatedAfterMs(),
-		UpdatedBefore: req.GetUpdatedBeforeMs(), Body: req.GetIncludeBody()})
+		UpdatedBefore: req.GetUpdatedBeforeMs(), MinRatings: req.GetMinRatingCount(), Body: req.GetIncludeBody(), Ratings: req.GetIncludeRatings()})
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -340,11 +443,11 @@ func (s *Server) ListTitles(ctx context.Context, _ *pb.ListTitlesRequest) (*pb.L
 func mapErr(err error) error {
 	switch {
 	case errors.Is(err, service.ErrBadAccount), errors.Is(err, service.ErrBadRequest), errors.Is(err, store.ErrOverflow),
-		errors.Is(err, service.ErrNoRatings):
+		errors.Is(err, service.ErrRange), errors.Is(err, store.ErrNoRatingSlot):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, service.ErrTooLarge), errors.Is(err, store.ErrQuota):
 		return status.Error(codes.ResourceExhausted, err.Error())
-	case errors.Is(err, service.ErrForbidden):
+	case errors.Is(err, service.ErrForbidden), errors.Is(err, service.ErrSelfRating):
 		return status.Error(codes.PermissionDenied, err.Error())
 	case errors.Is(err, service.ErrNeedNet), errors.Is(err, store.ErrConflict), errors.Is(err, service.ErrNoBlobs), errors.Is(err, service.ErrMismatch):
 		return status.Error(codes.FailedPrecondition, err.Error())

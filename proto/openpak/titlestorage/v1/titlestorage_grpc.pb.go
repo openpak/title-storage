@@ -31,6 +31,10 @@ const (
 	TitleStorage_DeleteObjects_FullMethodName   = "/openpak.titlestorage.v1.TitleStorage/DeleteObjects"
 	TitleStorage_PrepareUpload_FullMethodName   = "/openpak.titlestorage.v1.TitleStorage/PrepareUpload"
 	TitleStorage_CompleteUpload_FullMethodName  = "/openpak.titlestorage.v1.TitleStorage/CompleteUpload"
+	TitleStorage_InitRating_FullMethodName      = "/openpak.titlestorage.v1.TitleStorage/InitRating"
+	TitleStorage_RateObject_FullMethodName      = "/openpak.titlestorage.v1.TitleStorage/RateObject"
+	TitleStorage_GetRatings_FullMethodName      = "/openpak.titlestorage.v1.TitleStorage/GetRatings"
+	TitleStorage_ResetRatings_FullMethodName    = "/openpak.titlestorage.v1.TitleStorage/ResetRatings"
 	TitleStorage_Usage_FullMethodName           = "/openpak.titlestorage.v1.TitleStorage/Usage"
 	TitleStorage_MapTitle_FullMethodName        = "/openpak.titlestorage.v1.TitleStorage/MapTitle"
 	TitleStorage_UpsertTitle_FullMethodName     = "/openpak.titlestorage.v1.TitleStorage/UpsertTitle"
@@ -85,6 +89,22 @@ type TitleStorageClient interface {
 	// a body. An upload not completed within the upload lifetime expires and its bytes are deleted.
 	PrepareUpload(ctx context.Context, in *PrepareUploadRequest, opts ...grpc.CallOption) (*PrepareUploadResponse, error)
 	CompleteUpload(ctx context.Context, in *CompleteUploadRequest, opts ...grpc.CallOption) (*ObjectResponse, error)
+	// Ratings (v0.5.0): numeric rating slots on an object (NEX DataStore ratings, likes, stars).
+	// A slot carries its policy (initial value, range, lock, flags) and a running total and count;
+	// every rater has one row per (object, slot) holding what it contributed, so a lock can be
+	// checked and an erased rater's contribution taken back out. Deleting an object deletes its
+	// ratings.
+	//
+	// InitRating creates a slot with its policy (a slot that exists is kept as it is: the first
+	// policy wins). The writer follows the write rule for the object's owner.
+	InitRating(ctx context.Context, in *InitRatingRequest, opts ...grpc.CallOption) (*RatingResponse, error)
+	// RateObject adds the rater's value to the slot (or, on a modifiable slot, replaces the rater's
+	// previous value). A slot that does not exist yet is created with the request's policy; without
+	// one it is InvalidArgument. A locked rater gets locked=true and the slot unchanged.
+	RateObject(ctx context.Context, in *RateObjectRequest, opts ...grpc.CallOption) (*RatingResponse, error)
+	GetRatings(ctx context.Context, in *GetRatingsRequest, opts ...grpc.CallOption) (*GetRatingsResponse, error)
+	// ResetRatings puts slots back to their initial value with no ratings (every rater's row goes).
+	ResetRatings(ctx context.Context, in *ResetRatingsRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
 	// Usage reports what one owner holds in one title against the quota.
 	Usage(ctx context.Context, in *UsageRequest, opts ...grpc.CallOption) (*UsageResponse, error)
 	// Operator calls.
@@ -221,6 +241,46 @@ func (c *titleStorageClient) CompleteUpload(ctx context.Context, in *CompleteUpl
 	return out, nil
 }
 
+func (c *titleStorageClient) InitRating(ctx context.Context, in *InitRatingRequest, opts ...grpc.CallOption) (*RatingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RatingResponse)
+	err := c.cc.Invoke(ctx, TitleStorage_InitRating_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *titleStorageClient) RateObject(ctx context.Context, in *RateObjectRequest, opts ...grpc.CallOption) (*RatingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RatingResponse)
+	err := c.cc.Invoke(ctx, TitleStorage_RateObject_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *titleStorageClient) GetRatings(ctx context.Context, in *GetRatingsRequest, opts ...grpc.CallOption) (*GetRatingsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRatingsResponse)
+	err := c.cc.Invoke(ctx, TitleStorage_GetRatings_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *titleStorageClient) ResetRatings(ctx context.Context, in *ResetRatingsRequest, opts ...grpc.CallOption) (*DeleteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteResponse)
+	err := c.cc.Invoke(ctx, TitleStorage_ResetRatings_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *titleStorageClient) Usage(ctx context.Context, in *UsageRequest, opts ...grpc.CallOption) (*UsageResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(UsageResponse)
@@ -309,6 +369,22 @@ type TitleStorageServer interface {
 	// a body. An upload not completed within the upload lifetime expires and its bytes are deleted.
 	PrepareUpload(context.Context, *PrepareUploadRequest) (*PrepareUploadResponse, error)
 	CompleteUpload(context.Context, *CompleteUploadRequest) (*ObjectResponse, error)
+	// Ratings (v0.5.0): numeric rating slots on an object (NEX DataStore ratings, likes, stars).
+	// A slot carries its policy (initial value, range, lock, flags) and a running total and count;
+	// every rater has one row per (object, slot) holding what it contributed, so a lock can be
+	// checked and an erased rater's contribution taken back out. Deleting an object deletes its
+	// ratings.
+	//
+	// InitRating creates a slot with its policy (a slot that exists is kept as it is: the first
+	// policy wins). The writer follows the write rule for the object's owner.
+	InitRating(context.Context, *InitRatingRequest) (*RatingResponse, error)
+	// RateObject adds the rater's value to the slot (or, on a modifiable slot, replaces the rater's
+	// previous value). A slot that does not exist yet is created with the request's policy; without
+	// one it is InvalidArgument. A locked rater gets locked=true and the slot unchanged.
+	RateObject(context.Context, *RateObjectRequest) (*RatingResponse, error)
+	GetRatings(context.Context, *GetRatingsRequest) (*GetRatingsResponse, error)
+	// ResetRatings puts slots back to their initial value with no ratings (every rater's row goes).
+	ResetRatings(context.Context, *ResetRatingsRequest) (*DeleteResponse, error)
 	// Usage reports what one owner holds in one title against the quota.
 	Usage(context.Context, *UsageRequest) (*UsageResponse, error)
 	// Operator calls.
@@ -360,6 +436,18 @@ func (UnimplementedTitleStorageServer) PrepareUpload(context.Context, *PrepareUp
 }
 func (UnimplementedTitleStorageServer) CompleteUpload(context.Context, *CompleteUploadRequest) (*ObjectResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CompleteUpload not implemented")
+}
+func (UnimplementedTitleStorageServer) InitRating(context.Context, *InitRatingRequest) (*RatingResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method InitRating not implemented")
+}
+func (UnimplementedTitleStorageServer) RateObject(context.Context, *RateObjectRequest) (*RatingResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RateObject not implemented")
+}
+func (UnimplementedTitleStorageServer) GetRatings(context.Context, *GetRatingsRequest) (*GetRatingsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetRatings not implemented")
+}
+func (UnimplementedTitleStorageServer) ResetRatings(context.Context, *ResetRatingsRequest) (*DeleteResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResetRatings not implemented")
 }
 func (UnimplementedTitleStorageServer) Usage(context.Context, *UsageRequest) (*UsageResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Usage not implemented")
@@ -610,6 +698,78 @@ func _TitleStorage_CompleteUpload_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TitleStorage_InitRating_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InitRatingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TitleStorageServer).InitRating(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TitleStorage_InitRating_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TitleStorageServer).InitRating(ctx, req.(*InitRatingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _TitleStorage_RateObject_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RateObjectRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TitleStorageServer).RateObject(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TitleStorage_RateObject_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TitleStorageServer).RateObject(ctx, req.(*RateObjectRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _TitleStorage_GetRatings_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRatingsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TitleStorageServer).GetRatings(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TitleStorage_GetRatings_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TitleStorageServer).GetRatings(ctx, req.(*GetRatingsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _TitleStorage_ResetRatings_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResetRatingsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TitleStorageServer).ResetRatings(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TitleStorage_ResetRatings_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TitleStorageServer).ResetRatings(ctx, req.(*ResetRatingsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _TitleStorage_Usage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(UsageRequest)
 	if err := dec(in); err != nil {
@@ -736,6 +896,22 @@ var TitleStorage_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CompleteUpload",
 			Handler:    _TitleStorage_CompleteUpload_Handler,
+		},
+		{
+			MethodName: "InitRating",
+			Handler:    _TitleStorage_InitRating_Handler,
+		},
+		{
+			MethodName: "RateObject",
+			Handler:    _TitleStorage_RateObject_Handler,
+		},
+		{
+			MethodName: "GetRatings",
+			Handler:    _TitleStorage_GetRatings_Handler,
+		},
+		{
+			MethodName: "ResetRatings",
+			Handler:    _TitleStorage_ResetRatings_Handler,
 		},
 		{
 			MethodName: "Usage",

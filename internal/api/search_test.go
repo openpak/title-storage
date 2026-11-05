@@ -11,7 +11,7 @@ import (
 
 // TestSearch covers the v0.4.0 ListObjects filters (NEX DataStoreSearchParam): every-owner scope
 // and exclusions, created/updated ranges, numeric metadata ranges, collection lists, and the
-// rating sort's refusal before the ratings tier.
+// refusals.
 func TestSearch(t *testing.T) {
 	e := setup(t)
 	c, ctx := e.ts, e.ctx
@@ -106,7 +106,8 @@ func TestSearch(t *testing.T) {
 		{Viewer: alice, AllOwners: true, ExcludeOwners: []string{"not-an-account"}},
 		{Viewer: alice, AllOwners: true, Collections: []string{"bad coll"}},
 		{Viewer: alice, AllOwners: true, Sort: "bogus"},
-		{Viewer: alice, AllOwners: true, Sort: "rating:0"}, // the ratings tier is v0.5.0
+		{Viewer: alice, AllOwners: true, Sort: "rating:256"},
+		{Viewer: alice, AllOwners: true, MinRatingCount: 1}, // needs a rating sort
 	} {
 		req.Ref = np
 		if _, err := c.ListObjects(ctx, req); code(err) != codes.InvalidArgument {

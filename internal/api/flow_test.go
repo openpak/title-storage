@@ -78,7 +78,7 @@ func setupWith(t *testing.T, configure func(*service.Service)) *env {
 		t.Fatal(err)
 	}
 	t.Cleanup(st.Close)
-	if _, err := st.DB.Exec(context.Background(), `TRUNCATE variables, objects, title_keys, titles, uploads, blob_trash`); err != nil {
+	if _, err := st.DB.Exec(context.Background(), `TRUNCATE ratings, rating_slots, variables, objects, title_keys, titles, uploads, blob_trash`); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.MapTitle(context.Background(), "terraria", "Terraria", "np", "NPWR04270_00"); err != nil {

@@ -40,7 +40,8 @@ var (
 	ErrNoUpload   = errors.New("title-storage: no such upload (expired, replaced or already completed)")
 	ErrMismatch   = errors.New("title-storage: the uploaded body does not match the prepared upload")
 	ErrBlobs      = errors.New("title-storage: blob store unavailable")
-	ErrNoRatings  = errors.New("title-storage: rating sorts need the ratings tier (v0.5.0)")
+	ErrSelfRating = errors.New("title-storage: the owner may not rate this object")
+	ErrRange      = errors.New("title-storage: rating value out of the slot's range")
 )
 
 var (
@@ -517,7 +518,7 @@ func (s *Service) GetObject(ctx context.Context, r Ref, viewer, owner, collectio
 
 // GetObjectByID is GetObject for a caller that holds the id. The id is global, so a title that
 // is per network hides objects written by other networks only when the caller names its own.
-func (s *Service) GetObjectByID(ctx context.Context, network, viewer string, id int64, body bool) (*store.Object, error) {
+func (s *Service) GetObjectByID(ctx context.Context, network, viewer string, id int64, body, ratings bool) (*store.Object, error) {
 	if viewer != "" {
 		if err := validAccount(viewer); err != nil {
 			return nil, err
@@ -533,6 +534,13 @@ func (s *Service) GetObjectByID(ctx context.Context, network, viewer string, id 
 	ok, err := s.canRead(ctx, viewer, o.Owner, o.Visibility)
 	if err != nil || !ok {
 		return nil, err
+	}
+	if ratings {
+		one := []store.Object{*o}
+		if err := s.attachRatings(ctx, one); err != nil {
+			return nil, err
+		}
+		o = &one[0]
 	}
 	return o, s.withURL(ctx, o)
 }
@@ -550,7 +558,9 @@ type ObjQuery struct {
 	CreatedBefore int64
 	UpdatedAfter  int64
 	UpdatedBefore int64
+	MinRatings    uint32 // with a rating sort
 	Body          bool
+	Ratings       bool // attach every rating slot (Object.Ratings)
 }
 
 const MaxMetaRanges = 8
@@ -608,24 +618,38 @@ func msTime(ms int64) *time.Time {
 	return &t
 }
 
-// objSort checks a ListObjects sort. Rating sorts are recognised but need the ratings tier.
-func objSort(s string) error {
+// objSort checks a ListObjects sort; a rating sort ("rating:<slot>", "rating_avg:<slot>") returns
+// its slot.
+func objSort(s string) (slot *int32, avg bool, err error) {
 	switch s {
 	case "", "updated", "created", "size", "name", "id":
-		return nil
+		return nil, false, nil
 	}
-	if strings.HasPrefix(s, "rating:") || strings.HasPrefix(s, "rating_avg:") {
-		return ErrNoRatings
+	n, ok := strings.CutPrefix(s, "rating:")
+	if !ok {
+		if n, ok = strings.CutPrefix(s, "rating_avg:"); !ok {
+			return nil, false, ErrBadRequest
+		}
+		avg = true
 	}
-	return ErrBadRequest
+	v, err := strconv.ParseInt(n, 10, 32)
+	if err != nil || !validSlot(int32(v)) {
+		return nil, false, ErrBadRequest
+	}
+	sl := int32(v)
+	return &sl, avg, nil
 }
 
 func (s *Service) ListObjects(ctx context.Context, r Ref, q ObjQuery) ([]store.Object, int, error) {
 	if !store.ValidJSONObject(q.MetaFilter) || len(q.Collections) > MaxItems || len(q.ExcludeOwners) > MaxOwners {
 		return nil, 0, ErrBadRequest
 	}
-	if err := objSort(q.Sort); err != nil {
+	ratingSlot, ratingAvg, err := objSort(q.Sort)
+	if err != nil {
 		return nil, 0, err
+	}
+	if q.MinRatings > 0 && ratingSlot == nil {
+		return nil, 0, ErrBadRequest
 	}
 	for _, c := range q.Collections {
 		if !collRE.MatchString(c) {
@@ -663,11 +687,15 @@ func (s *Service) ListObjects(ctx context.Context, r Ref, q ObjQuery) ([]store.O
 	os, hits, err := s.Store.ListObjects(ctx, store.ObjQuery{T: t, Network: r.Network, Reader: rd, Owners: owners, AllOwners: q.AllOwners,
 		ExcludeOwners: excl, Collection: q.Collection, Collections: q.Collections, Names: q.Names, MetaFilter: q.MetaFilter, MetaRanges: ranges,
 		CreatedAfter: msTime(q.CreatedAfter), CreatedBefore: msTime(q.CreatedBefore), UpdatedAfter: msTime(q.UpdatedAfter), UpdatedBefore: msTime(q.UpdatedBefore),
-		Sort: q.Sort, Ascending: q.Ascending, Offset: max(q.Offset, 0), Limit: clamp(q.Limit), WithBody: q.Body})
+		Sort: q.Sort, RatingSlot: ratingSlot, RatingAvg: ratingAvg, MinRatings: int64(q.MinRatings),
+		Ascending: q.Ascending, Offset: max(q.Offset, 0), Limit: clamp(q.Limit), WithBody: q.Body})
 	for i := range os {
 		if err == nil {
 			err = s.withURL(ctx, &os[i])
 		}
+	}
+	if err == nil && q.Ratings {
+		err = s.attachRatings(ctx, os)
 	}
 	return os, hits, err
 }
@@ -712,19 +740,19 @@ func (s *Service) Usage(ctx context.Context, r Ref, owner string) (Usage, error)
 }
 
 // EraseAccount is the account-erasure finaliser's call: rows deleted (variables, objects, pending
-// uploads) and blobs deleted from the bucket. The blobs are deleted before it answers; when the
-// bucket fails the rows are already gone and the error asks for the repeat, which finishes the
-// blobs (the trash remembers them under the account).
-func (s *Service) EraseAccount(ctx context.Context, account string) (rows, blobCount int64, err error) {
+// uploads), the ratings it made and the ratings on its objects, and blobs deleted from the bucket.
+// The blobs are deleted before it answers; when the bucket fails the rows are already gone and the
+// error asks for the repeat, which finishes the blobs (the trash remembers them under the account).
+func (s *Service) EraseAccount(ctx context.Context, account string) (e store.Erased, blobCount int64, err error) {
 	if err := validAccount(account); err != nil {
-		return 0, 0, err
+		return e, 0, err
 	}
 	account = strings.ToLower(account)
-	if rows, err = s.Store.EraseAccount(ctx, account); err != nil {
-		return 0, 0, err
+	if e, err = s.Store.EraseAccount(ctx, account); err != nil {
+		return store.Erased{}, 0, err
 	}
 	blobCount, err = s.Drain(ctx, account)
-	return rows, blobCount, err
+	return e, blobCount, err
 }
 
 // ---- blob tier ----

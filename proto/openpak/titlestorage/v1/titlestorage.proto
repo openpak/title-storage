@@ -51,6 +51,23 @@ service TitleStorage {
   rpc PrepareUpload(PrepareUploadRequest) returns (PrepareUploadResponse);
   rpc CompleteUpload(CompleteUploadRequest) returns (ObjectResponse);
 
+  // Ratings (v0.5.0): numeric rating slots on an object (NEX DataStore ratings, likes, stars).
+  // A slot carries its policy (initial value, range, lock, flags) and a running total and count;
+  // every rater has one row per (object, slot) holding what it contributed, so a lock can be
+  // checked and an erased rater's contribution taken back out. Deleting an object deletes its
+  // ratings.
+  //
+  // InitRating creates a slot with its policy (a slot that exists is kept as it is: the first
+  // policy wins). The writer follows the write rule for the object's owner.
+  rpc InitRating(InitRatingRequest) returns (RatingResponse);
+  // RateObject adds the rater's value to the slot (or, on a modifiable slot, replaces the rater's
+  // previous value). A slot that does not exist yet is created with the request's policy; without
+  // one it is InvalidArgument. A locked rater gets locked=true and the slot unchanged.
+  rpc RateObject(RateObjectRequest) returns (RatingResponse);
+  rpc GetRatings(GetRatingsRequest) returns (GetRatingsResponse);
+  // ResetRatings puts slots back to their initial value with no ratings (every rater's row goes).
+  rpc ResetRatings(ResetRatingsRequest) returns (DeleteResponse);
+
   // Usage reports what one owner holds in one title against the quota.
   rpc Usage(UsageRequest) returns (UsageResponse);
 
@@ -190,6 +207,7 @@ message Object {
   string get_url     = 16; // presigned GET, short-lived; empty for an inline object
   bool   blob        = 17;
   string sha256      = 18; // hex, when the uploader gave one
+  repeated Rating ratings = 19; // with include_ratings (v0.5.0): every rating slot of the object
 }
 
 message PutObjectRequest {
@@ -221,6 +239,7 @@ message GetObjectByIDRequest {
   string viewer  = 2;
   uint64 id      = 3;
   bool include_body = 4;
+  bool include_ratings = 5; // v0.5.0
 }
 
 // ObjectResponse: found=false is "no such object or not visible to the viewer" (the same answer,
@@ -261,6 +280,10 @@ message ListObjectsRequest {
   int64 updated_after_ms  = 19;
   int64 updated_before_ms = 20;
   repeated string collections = 21; // any of these collections (with collection: either)
+  // Ratings (v0.5.0): only objects whose sorted rating slot has at least this many ratings (NEX
+  // MinimalRatingFrequency); needs a rating sort.
+  uint32 min_rating_count = 22;
+  bool include_ratings    = 23;
 }
 message ListObjectsResponse {
   repeated Object objects = 1;
@@ -305,6 +328,81 @@ message PrepareUploadResponse {
 message CompleteUploadRequest {
   uint64 id     = 1;
   string writer = 2; // the same rule as any write to the owner
+}
+
+// ---- ratings ----
+
+// RatingPolicy is a slot's behaviour, fixed when the slot is created (NEX DataStoreRatingInitParam).
+message RatingPolicy {
+  int64 initial_value = 1; // the total a slot starts from
+  // "none" (default): rate any number of times; "interval": once per interval_seconds;
+  // "period": once until the next period boundary; "permanent": once per rater, ever.
+  string lock = 2;
+  uint32 interval_seconds = 3;
+  // lock "period": the boundary is period_hour (0-23, UTC) on period_day: -17 = the 1st of the
+  // next month, -1..-7 = the next Monday..Sunday after the rating day (NEX RatingLockPeriod).
+  int32 period_day  = 4;
+  int32 period_hour = 5;
+  optional int64 range_min = 6; // a value outside [range_min, range_max] is InvalidArgument
+  optional int64 range_max = 7;
+  bool modifiable = 8;          // a rater's repeat replaces its value (the count stays) instead of adding a rating
+  bool round_minus = 9;         // a negative value counts as 0 (before the range check)
+  bool disable_self_rating = 10; // the object's owner may not rate it (PermissionDenied)
+}
+
+message Rating {
+  uint64 id   = 1; // the object
+  int32 slot  = 2; // 0-255
+  int64 total = 3; // initial_value plus every rating
+  uint32 count = 4;
+  int64 initial_value = 5;
+  RatingPolicy policy = 6;
+  // With a rater on the request: that rater's row.
+  bool rated = 7;
+  int64 rater_value = 8;  // what the rater contributed (its current value on a modifiable slot)
+  uint32 rater_count = 9;
+  int64 rated_unix_ms = 10; // its last rating
+  int64 lock_expires_unix_ms = 11; // 0 = may rate now; -1 = never again (permanent)
+}
+
+message InitRatingRequest {
+  string network = 1; // the caller's network (a per-network title hides other networks' objects)
+  uint64 id      = 2;
+  string writer  = 3;
+  int32 slot     = 4;
+  RatingPolicy policy = 5;
+}
+
+message RateObjectRequest {
+  string network = 1;
+  uint64 id      = 2;
+  int32 slot     = 3;
+  string rater   = 4; // a core account id; it must be able to read the object
+  int64 value    = 5;
+  RatingPolicy policy = 6; // creates the slot when it does not exist yet; ignored otherwise
+}
+
+// RatingResponse: found=false is "no such object or not visible" (as ObjectResponse).
+message RatingResponse {
+  Rating rating = 1; // the slot after the call, with the rater's row
+  bool found    = 2;
+  bool locked   = 3; // the rater is locked out: nothing changed, rating.lock_expires_unix_ms says until when
+}
+
+message GetRatingsRequest {
+  string network = 1;
+  string viewer  = 2;
+  repeated uint64 ids  = 3; // max 1000; objects the viewer cannot read are left out
+  repeated int32 slots = 4; // empty = every slot
+  string rater   = 5;       // optional: fill in this account's rows (rated, lock)
+}
+message GetRatingsResponse { repeated Rating ratings = 1; } // by id, then slot; slots never created are absent
+
+message ResetRatingsRequest {
+  string network = 1;
+  uint64 id      = 2;
+  string writer  = 3; // the write rule for the object's owner
+  repeated int32 slots = 4; // empty = every slot
 }
 
 // ---- quota ----
