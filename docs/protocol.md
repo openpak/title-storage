@@ -57,9 +57,32 @@ that prints centiseconds can echo them back and match.
 | `PutObject(ref, owner, writer, setter, collection, name, info, meta_json, body, visibility, ttl_seconds, condition)` | create or replace. `collection` defaults to `default`; an empty `name` is named by the new id. The numeric `id` is assigned once and survives replacement. `ttl_seconds` sets an expiry (0 keeps the current one). `Condition` is checked against the existing object |
 | `GetObject(ref, viewer, owner, collection, name, include_body)` | `found=false` for missing, expired or unreadable. With `owner` empty it finds the newest object of that collection and name under any owner (for upload references that are unguessable by construction; the viewer rules still apply) |
 | `GetObjectByID(network, viewer, id, include_body)` | the same by global id |
-| `ListObjects(ref, viewer, owners[] or friends_of_viewer [+include_self], collection, names[], meta_filter_json, sort, ascending, offset, limit, include_body)` | `sort` is `updated`, `created`, `size`, `name` or `id`; `meta_filter_json` matches objects whose metadata contains it (jsonb `@>`) |
+| `ListObjects(ref, viewer, owners[] or friends_of_viewer [+include_self] or all_owners, exclude_owners[], collection, collections[], names[], meta_filter_json, meta_range_json, created_after_ms, created_before_ms, updated_after_ms, updated_before_ms, sort, ascending, offset, limit, include_body)` | the search; see below |
 | `DeleteObjects(ref, owner, writer, collection, names[])` | empty `names` = the whole collection |
 | `Usage(ref, owner)` | bytes, objects, variables and the limits that apply |
+
+### Searching objects (`ListObjects`)
+
+Every filter is optional and they combine with AND; `hits` is the size of the whole match before
+`offset`/`limit` (default 100, max 1000).
+
+| Field | Meaning |
+| --- | --- |
+| scope | exactly one of `owners[]` (max 1000), `friends_of_viewer` (+ `include_self`), or `all_owners` (every owner in the title). The viewer rules apply to every scope: with `all_owners` an anonymous viewer sees public rows and virtual owners only, a signed-in one also its own and its friends' `friends` rows |
+| `exclude_owners[]` | owners left out of the scope (NEX `SearchTargetAnybodyExcludeSpecified`) |
+| `collection`, `collections[]` | one collection, or any of a list (NEX `DataTypes`); both given = any of them |
+| `names[]` | exact names |
+| `meta_filter_json` | metadata contains this JSON (jsonb `@>`): equality on keys, membership in arrays (`{"tags":["kart"]}`) |
+| `meta_range_json` | inclusive numeric ranges on top-level metadata keys: `{"data_type":{"ge":1,"le":5},"plays":{"ge":10}}`. Only `ge` and `le`; a key with `{}` only requires a number. An object whose key is missing or not a JSON number does not match. Bounds compare as exact decimals (int64 values are safe). At most 8 keys, keys `[A-Za-z0-9_.-]{1,64}`; key and bounds are bound parameters, never SQL text |
+| `created_after_ms`, `created_before_ms`, `updated_after_ms`, `updated_before_ms` | inclusive Unix-ms bounds; 0 = unbounded |
+| `sort` | `updated` (default), `created`, `size`, `name`, `id`, newest/largest first unless `ascending`; ties by id. `rating:<slot>` / `rating_avg:<slot>` are the ratings tier's (v0.5.0) and are `InvalidArgument` before it |
+
+Mapping from NEX `DataStoreSearchParam`: `OwnerType` anybody / friends / anybody-except =
+`all_owners` / `friends_of_viewer` / `all_owners` + `exclude_owners`; `OwnerIDs` = `owners`;
+`DataType`/`DataTypes` = `collection`/`collections` (or a `data_type` metadata range);
+`CreatedAfter/Before`, `UpdatedAfter/Before` = the time bounds; `Tags` = `meta_filter_json`
+`{"tags":[...]}`; `ResultOrderColumn`/`ResultOrder` = `sort`/`ascending`; `ResultRange` =
+`offset`/`limit`.
 
 ## Blob tier (large bodies)
 
@@ -128,5 +151,8 @@ Postgres `title_storage`: `titles` (policy), `title_keys`, `variables` (primary 
 `(title_key, ns, owner, slot)`), `objects` (unique `(title_key, ns, owner, collection, name)`, a
 global `id`, `meta jsonb`, `body bytea`, `blob_key`/`sha256` for a blob-backed body), `uploads`
 (prepared uploads, the reserved id, `expires_at`), `blob_trash` (bucket keys still to delete).
+Search indexes: `objects_list (title_key, collection, updated)` and `objects_created (title_key,
+collection, created)`; metadata ranges and containment filter within those (no per-key index:
+title sizes do not need one yet).
 `ns` is empty on a cross-network title and the network on
 a per-network one. Migrated at start.

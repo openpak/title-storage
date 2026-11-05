@@ -240,11 +240,27 @@ message ListObjectsRequest {
   string collection      = 6; // empty = every collection
   repeated string names  = 7; // empty = every name
   string meta_filter_json = 8; // objects whose metadata contains this JSON (jsonb @>)
-  string sort            = 9;  // "updated" (default) | "created" | "size" | "name" | "id"
+  // "updated" (default) | "created" | "size" | "name" | "id"; "rating:<slot>" (the slot's total)
+  // and "rating_avg:<slot>" (its average) sort by a rating slot (v0.5.0; InvalidArgument before).
+  string sort            = 9;
   bool ascending         = 10;
   uint32 offset          = 11;
   uint32 limit           = 12; // default 100, max 1000
   bool include_body      = 13;
+  // Search (v0.4.0). Every filter is optional (0 / empty = not applied) and they combine with AND.
+  // Time bounds are Unix ms and inclusive.
+  int64 created_after_ms  = 14;
+  int64 created_before_ms = 15;
+  // Numeric ranges on top-level metadata keys, inclusive:
+  // {"data_type": {"ge": 1, "le": 5}, "plays": {"ge": 10}}. An object whose key is missing or not
+  // a JSON number does not match. At most 8 keys; keys are [A-Za-z0-9_.-]{1,64}.
+  string meta_range_json  = 16;
+  // Every owner in the title (visibility still applies) instead of owners / friends_of_viewer.
+  bool all_owners         = 17;
+  repeated string exclude_owners = 18; // left out of any scope (NEX "anybody except")
+  int64 updated_after_ms  = 19;
+  int64 updated_before_ms = 20;
+  repeated string collections = 21; // any of these collections (with collection: either)
 }
 message ListObjectsResponse {
   repeated Object objects = 1;

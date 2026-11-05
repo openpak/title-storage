@@ -1605,11 +1605,27 @@ type ListObjectsRequest struct {
 	Collection      string                 `protobuf:"bytes,6,opt,name=collection,proto3" json:"collection,omitempty"`                                 // empty = every collection
 	Names           []string               `protobuf:"bytes,7,rep,name=names,proto3" json:"names,omitempty"`                                           // empty = every name
 	MetaFilterJson  string                 `protobuf:"bytes,8,opt,name=meta_filter_json,json=metaFilterJson,proto3" json:"meta_filter_json,omitempty"` // objects whose metadata contains this JSON (jsonb @>)
-	Sort            string                 `protobuf:"bytes,9,opt,name=sort,proto3" json:"sort,omitempty"`                                             // "updated" (default) | "created" | "size" | "name" | "id"
-	Ascending       bool                   `protobuf:"varint,10,opt,name=ascending,proto3" json:"ascending,omitempty"`
-	Offset          uint32                 `protobuf:"varint,11,opt,name=offset,proto3" json:"offset,omitempty"`
-	Limit           uint32                 `protobuf:"varint,12,opt,name=limit,proto3" json:"limit,omitempty"` // default 100, max 1000
-	IncludeBody     bool                   `protobuf:"varint,13,opt,name=include_body,json=includeBody,proto3" json:"include_body,omitempty"`
+	// "updated" (default) | "created" | "size" | "name" | "id"; "rating:<slot>" (the slot's total)
+	// and "rating_avg:<slot>" (its average) sort by a rating slot (v0.5.0; InvalidArgument before).
+	Sort        string `protobuf:"bytes,9,opt,name=sort,proto3" json:"sort,omitempty"`
+	Ascending   bool   `protobuf:"varint,10,opt,name=ascending,proto3" json:"ascending,omitempty"`
+	Offset      uint32 `protobuf:"varint,11,opt,name=offset,proto3" json:"offset,omitempty"`
+	Limit       uint32 `protobuf:"varint,12,opt,name=limit,proto3" json:"limit,omitempty"` // default 100, max 1000
+	IncludeBody bool   `protobuf:"varint,13,opt,name=include_body,json=includeBody,proto3" json:"include_body,omitempty"`
+	// Search (v0.4.0). Every filter is optional (0 / empty = not applied) and they combine with AND.
+	// Time bounds are Unix ms and inclusive.
+	CreatedAfterMs  int64 `protobuf:"varint,14,opt,name=created_after_ms,json=createdAfterMs,proto3" json:"created_after_ms,omitempty"`
+	CreatedBeforeMs int64 `protobuf:"varint,15,opt,name=created_before_ms,json=createdBeforeMs,proto3" json:"created_before_ms,omitempty"`
+	// Numeric ranges on top-level metadata keys, inclusive:
+	// {"data_type": {"ge": 1, "le": 5}, "plays": {"ge": 10}}. An object whose key is missing or not
+	// a JSON number does not match. At most 8 keys; keys are [A-Za-z0-9_.-]{1,64}.
+	MetaRangeJson string `protobuf:"bytes,16,opt,name=meta_range_json,json=metaRangeJson,proto3" json:"meta_range_json,omitempty"`
+	// Every owner in the title (visibility still applies) instead of owners / friends_of_viewer.
+	AllOwners       bool     `protobuf:"varint,17,opt,name=all_owners,json=allOwners,proto3" json:"all_owners,omitempty"`
+	ExcludeOwners   []string `protobuf:"bytes,18,rep,name=exclude_owners,json=excludeOwners,proto3" json:"exclude_owners,omitempty"` // left out of any scope (NEX "anybody except")
+	UpdatedAfterMs  int64    `protobuf:"varint,19,opt,name=updated_after_ms,json=updatedAfterMs,proto3" json:"updated_after_ms,omitempty"`
+	UpdatedBeforeMs int64    `protobuf:"varint,20,opt,name=updated_before_ms,json=updatedBeforeMs,proto3" json:"updated_before_ms,omitempty"`
+	Collections     []string `protobuf:"bytes,21,rep,name=collections,proto3" json:"collections,omitempty"` // any of these collections (with collection: either)
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -1733,6 +1749,62 @@ func (x *ListObjectsRequest) GetIncludeBody() bool {
 		return x.IncludeBody
 	}
 	return false
+}
+
+func (x *ListObjectsRequest) GetCreatedAfterMs() int64 {
+	if x != nil {
+		return x.CreatedAfterMs
+	}
+	return 0
+}
+
+func (x *ListObjectsRequest) GetCreatedBeforeMs() int64 {
+	if x != nil {
+		return x.CreatedBeforeMs
+	}
+	return 0
+}
+
+func (x *ListObjectsRequest) GetMetaRangeJson() string {
+	if x != nil {
+		return x.MetaRangeJson
+	}
+	return ""
+}
+
+func (x *ListObjectsRequest) GetAllOwners() bool {
+	if x != nil {
+		return x.AllOwners
+	}
+	return false
+}
+
+func (x *ListObjectsRequest) GetExcludeOwners() []string {
+	if x != nil {
+		return x.ExcludeOwners
+	}
+	return nil
+}
+
+func (x *ListObjectsRequest) GetUpdatedAfterMs() int64 {
+	if x != nil {
+		return x.UpdatedAfterMs
+	}
+	return 0
+}
+
+func (x *ListObjectsRequest) GetUpdatedBeforeMs() int64 {
+	if x != nil {
+		return x.UpdatedBeforeMs
+	}
+	return 0
+}
+
+func (x *ListObjectsRequest) GetCollections() []string {
+	if x != nil {
+		return x.Collections
+	}
+	return nil
 }
 
 type ListObjectsResponse struct {
@@ -2800,7 +2872,7 @@ const file_openpak_titlestorage_v1_titlestorage_proto_rawDesc = "" +
 	"\x0eObjectResponse\x127\n" +
 	"\x06object\x18\x01 \x01(\v2\x1f.openpak.titlestorage.v1.ObjectR\x06object\x12\x14\n" +
 	"\x05found\x18\x02 \x01(\bR\x05found\x12)\n" +
-	"\x10condition_failed\x18\x03 \x01(\bR\x0fconditionFailed\"\xab\x03\n" +
+	"\x10condition_failed\x18\x03 \x01(\bR\x0fconditionFailed\"\xe7\x05\n" +
 	"\x12ListObjectsRequest\x123\n" +
 	"\x03ref\x18\x01 \x01(\v2!.openpak.titlestorage.v1.TitleRefR\x03ref\x12\x16\n" +
 	"\x06viewer\x18\x02 \x01(\tR\x06viewer\x12\x16\n" +
@@ -2817,7 +2889,16 @@ const file_openpak_titlestorage_v1_titlestorage_proto_rawDesc = "" +
 	" \x01(\bR\tascending\x12\x16\n" +
 	"\x06offset\x18\v \x01(\rR\x06offset\x12\x14\n" +
 	"\x05limit\x18\f \x01(\rR\x05limit\x12!\n" +
-	"\finclude_body\x18\r \x01(\bR\vincludeBody\"d\n" +
+	"\finclude_body\x18\r \x01(\bR\vincludeBody\x12(\n" +
+	"\x10created_after_ms\x18\x0e \x01(\x03R\x0ecreatedAfterMs\x12*\n" +
+	"\x11created_before_ms\x18\x0f \x01(\x03R\x0fcreatedBeforeMs\x12&\n" +
+	"\x0fmeta_range_json\x18\x10 \x01(\tR\rmetaRangeJson\x12\x1d\n" +
+	"\n" +
+	"all_owners\x18\x11 \x01(\bR\tallOwners\x12%\n" +
+	"\x0eexclude_owners\x18\x12 \x03(\tR\rexcludeOwners\x12(\n" +
+	"\x10updated_after_ms\x18\x13 \x01(\x03R\x0eupdatedAfterMs\x12*\n" +
+	"\x11updated_before_ms\x18\x14 \x01(\x03R\x0fupdatedBeforeMs\x12 \n" +
+	"\vcollections\x18\x15 \x03(\tR\vcollections\"d\n" +
 	"\x13ListObjectsResponse\x129\n" +
 	"\aobjects\x18\x01 \x03(\v2\x1f.openpak.titlestorage.v1.ObjectR\aobjects\x12\x12\n" +
 	"\x04hits\x18\x02 \x01(\rR\x04hits\"\xaf\x01\n" +

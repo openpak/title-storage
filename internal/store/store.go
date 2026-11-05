@@ -199,6 +199,9 @@ CREATE TABLE IF NOT EXISTS blob_trash (
 );
 CREATE INDEX IF NOT EXISTS blob_trash_owner ON blob_trash (owner);
 
+-- Search (v0.4.0): created-time ranges and sorts.
+CREATE INDEX IF NOT EXISTS objects_created ON objects (title_key, collection, created);
+
 INSERT INTO titles (key, name) VALUES ('terraria', 'Terraria') ON CONFLICT DO NOTHING;
 INSERT INTO title_keys (network, native_id, title_key) VALUES ('np', 'NPWR04270_00', 'terraria') ON CONFLICT DO NOTHING;
 `
@@ -830,18 +833,33 @@ func (s *Store) ObjectByID(ctx context.Context, id int64, withBody bool) (*Objec
 
 // ObjQuery is an object listing.
 type ObjQuery struct {
-	T          Title
-	Network    string
-	Reader     Reader
-	Owners     []string
-	Collection string
-	Names      []string
-	MetaFilter string
-	Sort       string // updated | created | size | name | id
-	Ascending  bool
-	Offset     int
-	Limit      int
-	WithBody   bool
+	T             Title
+	Network       string
+	Reader        Reader
+	Owners        []string // the scope; ignored with AllOwners
+	AllOwners     bool
+	ExcludeOwners []string
+	Collection    string
+	Collections   []string // with Collection: any of them
+	Names         []string
+	MetaFilter    string
+	MetaRanges    []MetaRange
+	CreatedAfter  *time.Time // inclusive bounds
+	CreatedBefore *time.Time
+	UpdatedAfter  *time.Time
+	UpdatedBefore *time.Time
+	Sort          string // updated | created | size | name | id
+	Ascending     bool
+	Offset        int
+	Limit         int
+	WithBody      bool
+}
+
+// MetaRange is an inclusive numeric range on one top-level metadata key. Min and Max are decimal
+// literals (validated by the caller), "" = unbounded.
+type MetaRange struct {
+	Key      string
+	Min, Max string
 }
 
 func (s *Store) ListObjects(ctx context.Context, q ObjQuery) ([]Object, int, error) {
@@ -849,23 +867,58 @@ func (s *Store) ListObjects(ctx context.Context, q ObjQuery) ([]Object, int, err
 	if col == "" {
 		col = "updated"
 	}
-	args := []any{q.T.Key, q.T.NS(q.Network), q.Owners, q.Reader.Viewer, nonNil(q.Reader.Friends)}
-	where := `title_key=$1 AND ns=$2 AND owner = ANY($3) AND (expires_at IS NULL OR expires_at > now()) AND ` + visSQL(4, 5)
-	if q.Collection != "" {
-		args = append(args, q.Collection)
-		where += fmt.Sprintf(` AND collection = $%d`, len(args))
+	args := []any{q.T.Key, q.T.NS(q.Network), q.Reader.Viewer, nonNil(q.Reader.Friends)}
+	where := `title_key=$1 AND ns=$2 AND (expires_at IS NULL OR expires_at > now()) AND ` + visSQL(3, 4)
+	arg := func(v any) string {
+		args = append(args, v)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	if !q.AllOwners {
+		where += ` AND owner = ANY(` + arg(nonNil(q.Owners)) + `)`
+	}
+	if len(q.ExcludeOwners) > 0 {
+		where += ` AND NOT (owner = ANY(` + arg(q.ExcludeOwners) + `))`
+	}
+	switch colls := append([]string(nil), q.Collections...); {
+	case q.Collection != "" && len(colls) == 0:
+		where += ` AND collection = ` + arg(q.Collection)
+	case len(colls) > 0:
+		if q.Collection != "" {
+			colls = append(colls, q.Collection)
+		}
+		where += ` AND collection = ANY(` + arg(colls) + `)`
 	}
 	if len(q.Names) > 0 {
-		args = append(args, q.Names)
-		where += fmt.Sprintf(` AND name = ANY($%d)`, len(args))
+		where += ` AND name = ANY(` + arg(q.Names) + `)`
 	}
 	if q.MetaFilter != "" {
-		args = append(args, q.MetaFilter)
-		where += fmt.Sprintf(` AND meta @> $%d::jsonb`, len(args))
+		where += ` AND meta @> ` + arg(q.MetaFilter) + `::jsonb`
 	}
-	args = append(args, q.Limit, q.Offset)
-	rows, err := s.DB.Query(ctx, fmt.Sprintf(`SELECT %s%s, count(*) OVER() FROM objects WHERE %s ORDER BY %s %s, id LIMIT $%d OFFSET $%d`,
-		objCols, bodyCol(q.WithBody), where, col, orderDir(q.Ascending), len(args)-1, len(args)), args...)
+	for _, r := range q.MetaRanges {
+		// The CASE keeps the cast away from non-numbers; key and bounds are parameters.
+		k := arg(r.Key)
+		v := `CASE WHEN jsonb_typeof(meta->` + k + `) = 'number' THEN (meta->>` + k + `)::numeric END`
+		if r.Min != "" {
+			where += ` AND ` + v + ` >= ` + arg(r.Min) + `::text::numeric`
+		}
+		if r.Max != "" {
+			where += ` AND ` + v + ` <= ` + arg(r.Max) + `::text::numeric`
+		}
+		if r.Min == "" && r.Max == "" {
+			where += ` AND jsonb_typeof(meta->` + k + `) = 'number'`
+		}
+	}
+	for _, b := range []struct {
+		t  *time.Time
+		op string
+	}{{q.CreatedAfter, "created >= "}, {q.CreatedBefore, "created <= "}, {q.UpdatedAfter, "updated >= "}, {q.UpdatedBefore, "updated <= "}} {
+		if b.t != nil {
+			where += ` AND ` + b.op + arg(*b.t)
+		}
+	}
+	lim, off := arg(q.Limit), arg(q.Offset)
+	rows, err := s.DB.Query(ctx, fmt.Sprintf(`SELECT %s%s, count(*) OVER() FROM objects WHERE %s ORDER BY %s %s, id LIMIT %s OFFSET %s`,
+		objCols, bodyCol(q.WithBody), where, col, orderDir(q.Ascending), lim, off), args...)
 	if err != nil {
 		return nil, 0, err
 	}

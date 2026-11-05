@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.0 — 2026-11-05
+
+- Search (board openpak/prds#136, gap D3 of nex `docs/core-backed-storage.md`): `ListObjects`
+  gains `all_owners` (every owner, visibility still applied), `exclude_owners`, `collections`,
+  `created_after_ms`/`created_before_ms`, `updated_after_ms`/`updated_before_ms` (inclusive) and
+  `meta_range_json` (inclusive numeric `ge`/`le` on top-level metadata keys, exact decimals, bound
+  parameters only). `sort` recognises `rating:<slot>` / `rating_avg:<slot>` and refuses them with
+  `InvalidArgument` until the ratings tier (v0.5.0). Additive: existing requests answer as before.
+- Schema: index `objects_created (title_key, collection, created)` (migrated at start).
+
 ## v0.3.0 — 2026-11-05
 
 - Blob tier (board openpak/prds#134, gap D1 of nex `docs/core-backed-storage.md`): `PrepareUpload`

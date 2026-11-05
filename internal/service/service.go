@@ -7,9 +7,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"log"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -38,6 +40,7 @@ var (
 	ErrNoUpload   = errors.New("title-storage: no such upload (expired, replaced or already completed)")
 	ErrMismatch   = errors.New("title-storage: the uploaded body does not match the prepared upload")
 	ErrBlobs      = errors.New("title-storage: blob store unavailable")
+	ErrNoRatings  = errors.New("title-storage: rating sorts need the ratings tier (v0.5.0)")
 )
 
 var (
@@ -536,26 +539,131 @@ func (s *Service) GetObjectByID(ctx context.Context, network, viewer string, id 
 
 type ObjQuery struct {
 	Query
-	Collection string
-	Names      []string
-	MetaFilter string
-	Body       bool
+	AllOwners     bool
+	ExcludeOwners []string
+	Collection    string
+	Collections   []string
+	Names         []string
+	MetaFilter    string
+	MetaRange     string // {"key": {"ge": n, "le": m}, ...}
+	CreatedAfter  int64  // Unix ms, 0 = unbounded
+	CreatedBefore int64
+	UpdatedAfter  int64
+	UpdatedBefore int64
+	Body          bool
+}
+
+const MaxMetaRanges = 8
+
+var (
+	metaKeyRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+	numberRE  = regexp.MustCompile(`^-?(0|[1-9][0-9]{0,39})(\.[0-9]{1,20})?([eE][-+]?[0-9]{1,3})?$`)
+)
+
+// ParseMetaRange reads meta_range_json: top-level keys to {"ge": n, "le": m} (either bound may be
+// left out). Bounds stay decimal strings so int64 values compare exactly.
+func ParseMetaRange(js string) ([]store.MetaRange, error) {
+	if strings.TrimSpace(js) == "" {
+		return nil, nil
+	}
+	var m map[string]map[string]json.RawMessage
+	d := json.NewDecoder(strings.NewReader(js))
+	if err := d.Decode(&m); err != nil || d.More() {
+		return nil, ErrBadRequest
+	}
+	if len(m) > MaxMetaRanges {
+		return nil, ErrTooLarge
+	}
+	out := make([]store.MetaRange, 0, len(m))
+	for k, b := range m {
+		if !metaKeyRE.MatchString(k) {
+			return nil, ErrBadRequest
+		}
+		r := store.MetaRange{Key: k}
+		for op, n := range b {
+			// A JSON number literal only (a quoted "1" is refused).
+			if !numberRE.Match(n) {
+				return nil, ErrBadRequest
+			}
+			switch op {
+			case "ge":
+				r.Min = string(n)
+			case "le":
+				r.Max = string(n)
+			default:
+				return nil, ErrBadRequest
+			}
+		}
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
+}
+
+func msTime(ms int64) *time.Time {
+	if ms == 0 {
+		return nil
+	}
+	t := time.UnixMilli(ms).UTC()
+	return &t
+}
+
+// objSort checks a ListObjects sort. Rating sorts are recognised but need the ratings tier.
+func objSort(s string) error {
+	switch s {
+	case "", "updated", "created", "size", "name", "id":
+		return nil
+	}
+	if strings.HasPrefix(s, "rating:") || strings.HasPrefix(s, "rating_avg:") {
+		return ErrNoRatings
+	}
+	return ErrBadRequest
 }
 
 func (s *Service) ListObjects(ctx context.Context, r Ref, q ObjQuery) ([]store.Object, int, error) {
-	if !store.ValidJSONObject(q.MetaFilter) {
+	if !store.ValidJSONObject(q.MetaFilter) || len(q.Collections) > MaxItems || len(q.ExcludeOwners) > MaxOwners {
 		return nil, 0, ErrBadRequest
 	}
-	owners, rd, err := s.scope(ctx, q.Viewer, q.Owners, q.Friends, q.Self)
+	if err := objSort(q.Sort); err != nil {
+		return nil, 0, err
+	}
+	for _, c := range q.Collections {
+		if !collRE.MatchString(c) {
+			return nil, 0, ErrBadRequest
+		}
+	}
+	ranges, err := ParseMetaRange(q.MetaRange)
 	if err != nil {
 		return nil, 0, err
+	}
+	var owners []string
+	var rd store.Reader
+	if q.AllOwners {
+		if len(q.Owners) > 0 || q.Friends {
+			return nil, 0, ErrBadRequest
+		}
+		// Any owner can hold a friends-only row, so a signed-in viewer needs the friend list.
+		if rd, err = s.reader(ctx, q.Viewer, []string{""}, true); err != nil {
+			return nil, 0, err
+		}
+	} else if owners, rd, err = s.scope(ctx, q.Viewer, q.Owners, q.Friends, q.Self); err != nil {
+		return nil, 0, err
+	}
+	excl := make([]string, len(q.ExcludeOwners))
+	for i, o := range q.ExcludeOwners {
+		if err := validOwner(o); err != nil {
+			return nil, 0, err
+		}
+		excl[i] = strings.ToLower(o)
 	}
 	t, found, err := s.forRead(ctx, r)
 	if err != nil || !found {
 		return nil, 0, err
 	}
-	os, hits, err := s.Store.ListObjects(ctx, store.ObjQuery{T: t, Network: r.Network, Reader: rd, Owners: owners, Collection: q.Collection, Names: q.Names,
-		MetaFilter: q.MetaFilter, Sort: q.Sort, Ascending: q.Ascending, Offset: max(q.Offset, 0), Limit: clamp(q.Limit), WithBody: q.Body})
+	os, hits, err := s.Store.ListObjects(ctx, store.ObjQuery{T: t, Network: r.Network, Reader: rd, Owners: owners, AllOwners: q.AllOwners,
+		ExcludeOwners: excl, Collection: q.Collection, Collections: q.Collections, Names: q.Names, MetaFilter: q.MetaFilter, MetaRanges: ranges,
+		CreatedAfter: msTime(q.CreatedAfter), CreatedBefore: msTime(q.CreatedBefore), UpdatedAfter: msTime(q.UpdatedAfter), UpdatedBefore: msTime(q.UpdatedBefore),
+		Sort: q.Sort, Ascending: q.Ascending, Offset: max(q.Offset, 0), Limit: clamp(q.Limit), WithBody: q.Body})
 	for i := range os {
 		if err == nil {
 			err = s.withURL(ctx, &os[i])

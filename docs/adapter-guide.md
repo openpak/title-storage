@@ -54,7 +54,10 @@ Reference adapters: `np-tus` (variables and slots) and `np-uploader` (attachment
 * Permissions: owner-only to `private`, friends to `friends`, public to `public`. "Specified
   people" has no neutral form yet: keep the list in `meta_json` and filter adapter-side, or use
   `private` and have the adapter check its own list.
-* Search by tags/owner/period: `ListObjects` with `meta_filter_json` and `owners`.
+* Search (`DataStoreSearchParam`): `ListObjects` with `all_owners` / `friends_of_viewer` /
+  `owners` (+ `exclude_owners`), `collections`, `meta_filter_json` (tags), `meta_range_json`
+  (numeric ranges such as `data_type`), the created/updated bounds and `sort`; mapping table in
+  [protocol.md](protocol.md#searching-objects-listobjects).
   `expires` is `ttl_seconds`.
 * Upload (`PreparePostObject` / `CompletePostObject`): `PrepareUpload(..., size, post_form=true)`;
   the `id` is the data id, `put_url` + `form_fields` are the `DataStoreReqPostInfo` URL and form

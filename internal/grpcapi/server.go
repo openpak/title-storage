@@ -221,7 +221,10 @@ func (s *Server) ListObjects(ctx context.Context, req *pb.ListObjectsRequest) (*
 	os, hits, err := s.svc.ListObjects(ctx, ref(req.GetRef()), service.ObjQuery{
 		Query: service.Query{Viewer: req.GetViewer(), Owners: req.GetOwners(), Friends: req.GetFriendsOfViewer(), Self: req.GetIncludeSelf(),
 			Sort: req.GetSort(), Ascending: req.GetAscending(), Offset: int(req.GetOffset()), Limit: int(req.GetLimit())},
-		Collection: req.GetCollection(), Names: req.GetNames(), MetaFilter: req.GetMetaFilterJson(), Body: req.GetIncludeBody()})
+		AllOwners: req.GetAllOwners(), ExcludeOwners: req.GetExcludeOwners(), Collection: req.GetCollection(), Collections: req.GetCollections(),
+		Names: req.GetNames(), MetaFilter: req.GetMetaFilterJson(), MetaRange: req.GetMetaRangeJson(),
+		CreatedAfter: req.GetCreatedAfterMs(), CreatedBefore: req.GetCreatedBeforeMs(), UpdatedAfter: req.GetUpdatedAfterMs(),
+		UpdatedBefore: req.GetUpdatedBeforeMs(), Body: req.GetIncludeBody()})
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -336,7 +339,8 @@ func (s *Server) ListTitles(ctx context.Context, _ *pb.ListTitlesRequest) (*pb.L
 
 func mapErr(err error) error {
 	switch {
-	case errors.Is(err, service.ErrBadAccount), errors.Is(err, service.ErrBadRequest), errors.Is(err, store.ErrOverflow):
+	case errors.Is(err, service.ErrBadAccount), errors.Is(err, service.ErrBadRequest), errors.Is(err, store.ErrOverflow),
+		errors.Is(err, service.ErrNoRatings):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, service.ErrTooLarge), errors.Is(err, store.ErrQuota):
 		return status.Error(codes.ResourceExhausted, err.Error())
